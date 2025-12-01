@@ -7,7 +7,7 @@ echo ================================================
 echo.
 
 echo Compiling game...
-g++ -o ChronoHeist.exe ChronoHeist.cpp -lGL -lGLU -lglut -lm
+g++ -std=c++17 -O2 -o ChronoHeist.exe ChronoHeist.cpp -lGL -lGLU -lglut -lm
 
 if %ERRORLEVEL% EQU 0 (
     echo.

@@ -6,6 +6,10 @@
 #include <stdlib.h>    // Standard library functions (exit, etc.)
 #include <string.h>    // String manipulation functions
 #include <vector>      // STL vector for dynamic arrays
+#include <algorithm>
+#include <map>
+#include <string>
+#include <unordered_map>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -19,6 +23,12 @@
 #else
 #include <GL/glut.h>   // Linux/Mac GLUT header
 #endif
+
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define TINYGLTF_IMPLEMENTATION
+#define TINYGLTF_NOEXCEPTION
+#include "third_party/tiny_gltf.h"
 
 /*
  =============================================================================
@@ -96,6 +106,26 @@ const float FIRST_PERSON_DISTANCE = 0.0f;
 const float THIRD_PERSON_DISTANCE = 5.0f;
 const float THIRD_PERSON_HEIGHT = 2.0f;
 
+const char* TEXTURE_DIR = "textures/";
+const char* MODERN_TOKYO_BASE = "textures/modern_tokyo/basecolor.png";
+const char* ANCIENT_EGYPT_BASE = "textures/ancient_egypt/basecolor.jpg";
+const char* CHARACTER_SCENE_PATH = "main_character/scene.gltf";
+
+struct TextureResource {
+    GLuint id;
+    int width;
+    int height;
+    std::string source;
+
+    TextureResource() {
+        id = 0;
+        width = 0;
+        height = 0;
+    }
+
+    bool valid() const { return id != 0; }
+};
+
 // =============================================================================
 // Vector3f Class - 3D Vector Mathematics
 // =============================================================================
@@ -145,6 +175,27 @@ public:
 
     float dot(const Vector3f& v) const {
         return x * v.x + y * v.y + z * v.z;
+    }
+};
+
+struct CharacterMeshData {
+    std::vector<float> positions;
+    std::vector<float> normals;
+    std::vector<float> texcoords;
+    std::vector<unsigned int> indices;
+    TextureResource albedo;
+    Vector3f boundsMin;
+    Vector3f boundsMax;
+    Vector3f boundsCenter;
+    float scale;
+    bool loaded;
+
+    CharacterMeshData() {
+        boundsMin = Vector3f();
+        boundsMax = Vector3f();
+        boundsCenter = Vector3f();
+        scale = 1.0f;
+        loaded = false;
     }
 };
 
@@ -436,6 +487,12 @@ Camera camera;
 LightingSystem lighting;
 GameState gameState = STATE_MENU;
 
+TextureResource fallbackTexture;
+TextureResource neoTokyoSurface;
+TextureResource templeSurface;
+CharacterMeshData mainCharacterMesh;
+bool textureSystemReady = false;
+
 // Input state
 bool keys[256];
 bool mouseButtons[3];
@@ -468,6 +525,302 @@ std::vector<PickupAnimation> pickupAnimations;
 // Hit reaction state
 float hitReactionTime = 0.0f;
 bool hitReactionActive = false;
+
+// =============================================================================
+// Texture & Model Loading Helpers
+// =============================================================================
+
+TextureResource createSolidTexture(unsigned char r, unsigned char g, unsigned char b, unsigned char a = 255) {
+    TextureResource tex;
+    glGenTextures(1, &tex.id);
+    glBindTexture(GL_TEXTURE_2D, tex.id);
+    unsigned char data[4] = {r, g, b, a};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    tex.width = 1;
+    tex.height = 1;
+    tex.source = "solid_color";
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+TextureResource loadTextureFromFile(const std::string& path) {
+    TextureResource tex;
+    int width, height, channels;
+    stbi_uc* pixels = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+    if (!pixels) {
+        printf("Failed to load texture: %s\n", path.c_str());
+        return tex;
+    }
+
+    glGenTextures(1, &tex.id);
+    glBindTexture(GL_TEXTURE_2D, tex.id);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    tex.width = width;
+    tex.height = height;
+    tex.source = path;
+
+    stbi_image_free(pixels);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+TextureResource textureFromTinyImage(const tinygltf::Image& image) {
+    TextureResource tex;
+    if (image.image.empty()) {
+        return tex;
+    }
+
+    GLint format = GL_RGBA;
+#ifdef GL_LUMINANCE
+    if (image.component == 1) format = GL_LUMINANCE;
+    else if (image.component == 2) format = GL_LUMINANCE_ALPHA;
+    else
+#endif
+    if (image.component == 3) format = GL_RGB;
+
+    glGenTextures(1, &tex.id);
+    glBindTexture(GL_TEXTURE_2D, tex.id);
+    glTexImage2D(GL_TEXTURE_2D, 0, format, image.width, image.height, 0, format, GL_UNSIGNED_BYTE, image.image.data());
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    tex.width = image.width;
+    tex.height = image.height;
+    tex.source = image.uri.empty() ? "embedded_texture" : image.uri;
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+bool initializeTextureAssets() {
+    if (textureSystemReady) return true;
+    stbi_set_flip_vertically_on_load(true);
+
+    fallbackTexture = createSolidTexture(255, 255, 255);
+    neoTokyoSurface = loadTextureFromFile(MODERN_TOKYO_BASE);
+    templeSurface = loadTextureFromFile(ANCIENT_EGYPT_BASE);
+
+    if (!neoTokyoSurface.valid()) neoTokyoSurface = fallbackTexture;
+    if (!templeSurface.valid()) templeSurface = fallbackTexture;
+
+    textureSystemReady = true;
+    return true;
+}
+
+bool readAccessorData(const tinygltf::Model& model, const tinygltf::Accessor& accessor, std::vector<float>& outData, int components) {
+    if (accessor.bufferView < 0) return false;
+    const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
+    const tinygltf::Buffer& buffer = model.buffers[view.buffer];
+
+    const unsigned char* dataPtr = buffer.data.data() + view.byteOffset + accessor.byteOffset;
+    size_t stride = accessor.ByteStride(view);
+    if (stride == 0) {
+        stride = components * sizeof(float);
+    }
+
+    outData.resize(accessor.count * components);
+    for (size_t i = 0; i < accessor.count; ++i) {
+        memcpy(&outData[i * components], dataPtr + stride * i, components * sizeof(float));
+    }
+    return true;
+}
+
+bool readIndexData(const tinygltf::Model& model, const tinygltf::Accessor& accessor, std::vector<unsigned int>& outData) {
+    if (accessor.bufferView < 0) return false;
+    const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
+    const tinygltf::Buffer& buffer = model.buffers[view.buffer];
+    const unsigned char* dataPtr = buffer.data.data() + view.byteOffset + accessor.byteOffset;
+
+    outData.resize(accessor.count);
+    for (size_t i = 0; i < accessor.count; ++i) {
+        switch (accessor.componentType) {
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+                outData[i] = reinterpret_cast<const unsigned short*>(dataPtr)[i];
+                break;
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+                outData[i] = reinterpret_cast<const unsigned char*>(dataPtr)[i];
+                break;
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+                outData[i] = reinterpret_cast<const unsigned int*>(dataPtr)[i];
+                break;
+            default:
+                return false;
+        }
+    }
+    return true;
+}
+
+bool loadMainCharacterModel() {
+    tinygltf::TinyGLTF loader;
+    tinygltf::Model model;
+    std::string err;
+    std::string warn;
+
+    bool ok = loader.LoadASCIIFromFile(&model, &err, &warn, CHARACTER_SCENE_PATH);
+    if (!warn.empty()) {
+        printf("GLTF warning: %s\n", warn.c_str());
+    }
+    if (!ok) {
+        printf("Failed to load character model: %s\n", err.c_str());
+        return false;
+    }
+
+    if (model.meshes.empty()) {
+        printf("Character GLTF has no meshes.\n");
+        return false;
+    }
+
+    const tinygltf::Mesh& mesh = model.meshes[0];
+    if (mesh.primitives.empty()) {
+        printf("Character mesh has no primitives.\n");
+        return false;
+    }
+
+    const tinygltf::Primitive& primitive = mesh.primitives[0];
+    auto posIt = primitive.attributes.find("POSITION");
+    if (posIt == primitive.attributes.end()) {
+        printf("Character mesh missing POSITION data.\n");
+        return false;
+    }
+
+    const tinygltf::Accessor& posAccessor = model.accessors[posIt->second];
+    if (!readAccessorData(model, posAccessor, mainCharacterMesh.positions, 3)) {
+        printf("Failed to read POSITION data.\n");
+        return false;
+    }
+
+    auto normalIt = primitive.attributes.find("NORMAL");
+    if (normalIt != primitive.attributes.end()) {
+        readAccessorData(model, model.accessors[normalIt->second], mainCharacterMesh.normals, 3);
+    }
+
+    auto uvIt = primitive.attributes.find("TEXCOORD_0");
+    if (uvIt != primitive.attributes.end()) {
+        readAccessorData(model, model.accessors[uvIt->second], mainCharacterMesh.texcoords, 2);
+    }
+
+    if (primitive.indices >= 0) {
+        const tinygltf::Accessor& indexAccessor = model.accessors[primitive.indices];
+        readIndexData(model, indexAccessor, mainCharacterMesh.indices);
+    } else {
+        size_t vertexCount = posAccessor.count;
+        mainCharacterMesh.indices.resize(vertexCount);
+        for (size_t i = 0; i < vertexCount; ++i) {
+            mainCharacterMesh.indices[i] = static_cast<unsigned int>(i);
+        }
+    }
+
+    // Compute bounds
+    if (!mainCharacterMesh.positions.empty()) {
+        mainCharacterMesh.boundsMin = Vector3f(mainCharacterMesh.positions[0], mainCharacterMesh.positions[1], mainCharacterMesh.positions[2]);
+        mainCharacterMesh.boundsMax = mainCharacterMesh.boundsMin;
+        for (size_t i = 0; i < mainCharacterMesh.positions.size(); i += 3) {
+            float x = mainCharacterMesh.positions[i];
+            float y = mainCharacterMesh.positions[i + 1];
+            float z = mainCharacterMesh.positions[i + 2];
+            mainCharacterMesh.boundsMin.x = std::min(mainCharacterMesh.boundsMin.x, x);
+            mainCharacterMesh.boundsMin.y = std::min(mainCharacterMesh.boundsMin.y, y);
+            mainCharacterMesh.boundsMin.z = std::min(mainCharacterMesh.boundsMin.z, z);
+            mainCharacterMesh.boundsMax.x = std::max(mainCharacterMesh.boundsMax.x, x);
+            mainCharacterMesh.boundsMax.y = std::max(mainCharacterMesh.boundsMax.y, y);
+            mainCharacterMesh.boundsMax.z = std::max(mainCharacterMesh.boundsMax.z, z);
+        }
+        float height = std::max(0.001f, mainCharacterMesh.boundsMax.y - mainCharacterMesh.boundsMin.y);
+        mainCharacterMesh.scale = PLAYER_HEIGHT / height;
+        mainCharacterMesh.boundsCenter = Vector3f(
+            (mainCharacterMesh.boundsMin.x + mainCharacterMesh.boundsMax.x) * 0.5f,
+            (mainCharacterMesh.boundsMin.y + mainCharacterMesh.boundsMax.y) * 0.5f,
+            (mainCharacterMesh.boundsMin.z + mainCharacterMesh.boundsMax.z) * 0.5f
+        );
+    }
+
+    // Load texture
+    if (primitive.material >= 0 && primitive.material < model.materials.size()) {
+        const auto& material = model.materials[primitive.material];
+        if (material.pbrMetallicRoughness.baseColorTexture.index >= 0) {
+            const tinygltf::Texture& tex = model.textures[material.pbrMetallicRoughness.baseColorTexture.index];
+            if (tex.source >= 0 && tex.source < model.images.size()) {
+                mainCharacterMesh.albedo = textureFromTinyImage(model.images[tex.source]);
+            }
+        }
+    }
+
+    if (!mainCharacterMesh.albedo.valid()) {
+        mainCharacterMesh.albedo = fallbackTexture;
+    }
+
+    mainCharacterMesh.loaded = true;
+    printf("Loaded character mesh with %zu vertices and %zu triangles.\n",
+           mainCharacterMesh.positions.size() / 3,
+           mainCharacterMesh.indices.size() / 3);
+    return true;
+}
+
+void drawLoadedCharacter() {
+    if (!mainCharacterMesh.loaded || mainCharacterMesh.positions.empty() || mainCharacterMesh.indices.empty()) {
+        return;
+    }
+
+    bool hasUV = !mainCharacterMesh.texcoords.empty() && mainCharacterMesh.texcoords.size() / 2 >= mainCharacterMesh.positions.size() / 3;
+    bool hasNormals = !mainCharacterMesh.normals.empty();
+
+    if (mainCharacterMesh.albedo.valid()) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, mainCharacterMesh.albedo.id);
+        glColor3f(1.0f, 1.0f, 1.0f);
+    } else {
+        glDisable(GL_TEXTURE_2D);
+    }
+
+    glBegin(GL_TRIANGLES);
+    for (size_t i = 0; i < mainCharacterMesh.indices.size(); ++i) {
+        unsigned int idx = mainCharacterMesh.indices[i];
+        if (hasUV) {
+            float u = mainCharacterMesh.texcoords[idx * 2];
+            float v = mainCharacterMesh.texcoords[idx * 2 + 1];
+            glTexCoord2f(u, v);
+        }
+        if (hasNormals) {
+            float nx = mainCharacterMesh.normals[idx * 3];
+            float ny = mainCharacterMesh.normals[idx * 3 + 1];
+            float nz = mainCharacterMesh.normals[idx * 3 + 2];
+            glNormal3f(nx, ny, nz);
+        }
+        float vx = mainCharacterMesh.positions[idx * 3];
+        float vy = mainCharacterMesh.positions[idx * 3 + 1];
+        float vz = mainCharacterMesh.positions[idx * 3 + 2];
+        glVertex3f(vx, vy, vz);
+    }
+    glEnd();
+
+    if (mainCharacterMesh.albedo.valid()) {
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+    }
+}
+
+void useTexture(const TextureResource& tex) {
+    if (tex.valid()) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, tex.id);
+        glColor3f(1.0f, 1.0f, 1.0f);
+    } else {
+        glDisable(GL_TEXTURE_2D);
+    }
+}
 
 // =============================================================================
 // Utility Functions
@@ -617,19 +970,27 @@ void drawPlayer() {
     glTranslatef(player.position.x, player.position.y, player.position.z);
     glRotatef(player.yaw, 0, 1, 0);
 
-    glColor3f(0.2f, 0.4f, 0.8f);
-    
-    // Body
-    glPushMatrix();
-    glTranslatef(0, 0.5f, 0);
-    drawCube(0.6f);
-    glPopMatrix();
+    if (mainCharacterMesh.loaded) {
+        glScalef(mainCharacterMesh.scale, mainCharacterMesh.scale, mainCharacterMesh.scale);
+        glTranslatef(-mainCharacterMesh.boundsCenter.x,
+                     -mainCharacterMesh.boundsCenter.y,
+                     -mainCharacterMesh.boundsCenter.z);
+        drawLoadedCharacter();
+    } else {
+        glColor3f(0.2f, 0.4f, 0.8f);
+        
+        // Body
+        glPushMatrix();
+        glTranslatef(0, 0.5f, 0);
+        drawCube(0.6f);
+        glPopMatrix();
 
-    // Head
-    glPushMatrix();
-    glTranslatef(0, 1.2f, 0);
-    drawSphere(0.3f, 12, 12);
-    glPopMatrix();
+        // Head
+        glPushMatrix();
+        glTranslatef(0, 1.2f, 0);
+        drawSphere(0.3f, 12, 12);
+        glPopMatrix();
+    }
 
     glPopMatrix();
 }
@@ -855,50 +1216,53 @@ void drawGuardianStatue(Vector3f pos, float rotation) {
 }
 
 void drawNeoTokyoEnvironment() {
-    // Floor
-    glColor3f(0.15f, 0.15f, 0.2f);
+    // Floor + walls texture
+    float floorRepeat = 8.0f;
+    useTexture(neoTokyoSurface);
     glBegin(GL_QUADS);
     glNormal3f(0, 1, 0);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(floorRepeat, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(floorRepeat, floorRepeat); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, floorRepeat); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
     glEnd();
 
-    // Walls
-    glColor3f(0.2f, 0.25f, 0.3f);
+    float wallRepeat = 6.0f;
     // North wall
     glBegin(GL_QUADS);
     glNormal3f(0, 0, -1);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MIN);
-    glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MIN);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(wallRepeat, CEILING_Y * 0.2f); glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MIN);
+    glTexCoord2f(0, CEILING_Y * 0.2f); glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MIN);
     glEnd();
     // South wall
     glBegin(GL_QUADS);
     glNormal3f(0, 0, 1);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
-    glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MAX);
-    glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MAX);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, CEILING_Y * 0.2f); glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MAX);
+    glTexCoord2f(wallRepeat, CEILING_Y * 0.2f); glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MAX);
+    glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
     glEnd();
     // East wall
     glBegin(GL_QUADS);
     glNormal3f(-1, 0, 0);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
-    glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MAX);
-    glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MIN);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(wallRepeat, CEILING_Y * 0.2f); glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MAX);
+    glTexCoord2f(0, CEILING_Y * 0.2f); glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MIN);
     glEnd();
     // West wall
     glBegin(GL_QUADS);
     glNormal3f(1, 0, 0);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MIN);
-    glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MAX);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(0, CEILING_Y * 0.2f); glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MIN);
+    glTexCoord2f(wallRepeat, CEILING_Y * 0.2f); glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MAX);
+    glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
     glEnd();
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
 
     // Decorative wall panels
     for (int i = 0; i < 8; i++) {
@@ -960,50 +1324,53 @@ void drawNeoTokyoEnvironment() {
 }
 
 void drawTempleEnvironment() {
-    // Floor
-    glColor3f(0.4f, 0.35f, 0.3f);
+    useTexture(templeSurface);
+    float floorRepeat = 6.0f;
     glBegin(GL_QUADS);
     glNormal3f(0, 1, 0);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(floorRepeat, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(floorRepeat, floorRepeat); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, floorRepeat); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
     glEnd();
 
     // Walls with hieroglyphic texture pattern
-    glColor3f(0.5f, 0.45f, 0.4f);
+    float wallRepeat = 4.0f;
     // North wall
     glBegin(GL_QUADS);
     glNormal3f(0, 0, -1);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MIN);
-    glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MIN);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(wallRepeat, CEILING_Y * 0.15f); glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MIN);
+    glTexCoord2f(0, CEILING_Y * 0.15f); glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MIN);
     glEnd();
     // South wall
     glBegin(GL_QUADS);
     glNormal3f(0, 0, 1);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
-    glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MAX);
-    glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MAX);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, CEILING_Y * 0.15f); glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MAX);
+    glTexCoord2f(wallRepeat, CEILING_Y * 0.15f); glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MAX);
+    glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
     glEnd();
     // East wall
     glBegin(GL_QUADS);
     glNormal3f(-1, 0, 0);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
-    glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MAX);
-    glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MIN);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MAX, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(wallRepeat, CEILING_Y * 0.15f); glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MAX);
+    glTexCoord2f(0, CEILING_Y * 0.15f); glVertex3f(WORLD_MAX, CEILING_Y, WORLD_MIN);
     glEnd();
     // West wall
     glBegin(GL_QUADS);
     glNormal3f(1, 0, 0);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
-    glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MIN);
-    glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MAX);
-    glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
+    glTexCoord2f(0, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
+    glTexCoord2f(0, CEILING_Y * 0.15f); glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MIN);
+    glTexCoord2f(wallRepeat, CEILING_Y * 0.15f); glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MAX);
+    glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
     glEnd();
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
 
     // Ancient columns
     for (int i = 0; i < 6; i++) {
@@ -1736,6 +2103,13 @@ int main(int argc, char** argv) {
     float matShininess[1] = {50.0f};
     glMaterialfv(GL_FRONT, GL_SPECULAR, matSpecular);
     glMaterialfv(GL_FRONT, GL_SHININESS, matShininess);
+
+    if (!initializeTextureAssets()) {
+        printf("Failed to initialize texture assets.\n");
+    }
+    if (!loadMainCharacterModel()) {
+        printf("Using fallback capsule player.\n");
+    }
     
     // Initialize input
     memset(keys, false, sizeof(keys));
