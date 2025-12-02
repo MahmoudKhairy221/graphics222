@@ -19,9 +19,10 @@
 // OpenGL/GLUT Includes
 // =============================================================================
 #ifdef _WIN32
-#include <glut.h>      // Windows GLUT header
+#include <windows.h>
+#include <GL/freeglut.h>   // Windows FreeGLUT header
 #else
-#include <GL/glut.h>   // Linux/Mac GLUT header
+#include <GL/glut.h>       // Linux/Mac GLUT header
 #endif
 
 #define STB_IMAGE_IMPLEMENTATION

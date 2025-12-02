@@ -7,7 +7,7 @@ echo ================================================
 echo.
 
 echo Compiling game...
-g++ -std=c++17 -O2 -o ChronoHeist.exe ChronoHeist.cpp -lGL -lGLU -lglut -lm
+g++ -std=c++17 -O2 ChronoHeist.cpp -o ChronoHeist.exe -lfreeglut -lopengl32 -lglu32 -static-libstdc++ -static-libgcc
 
 if %ERRORLEVEL% EQU 0 (
     echo.
@@ -18,12 +18,12 @@ if %ERRORLEVEL% EQU 0 (
     echo Game compiled successfully.
     echo.
     echo To run the game:
-    echo   ChronoHeist.exe
+    echo   .\ChronoHeist.exe
     echo.
 ) else (
     echo.
     echo Compilation failed! Check for errors above.
-    echo Make sure you have GLUT and OpenGL libraries installed.
+    echo Make sure MinGW-w64 (or MSYS2) with freeglut/opengl libraries is installed and on PATH.
 )
 
 pause

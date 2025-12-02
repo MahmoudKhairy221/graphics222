@@ -1,20 +1,26 @@
 #!/bin/bash
-# Run script for Chrono Heist Game
-# Usage: wsl -d Ubuntu -e bash -c "cd ~ && cp /mnt/c/Users/mahmo/Desktop/Graphics\ test/run_wsl.sh ~/run_wsl.sh && chmod +x ~/run_wsl.sh && ~/run_wsl.sh"
+# Helper script to compile and (optionally) run Chrono Heist inside WSL.
+# Usage from Windows PowerShell (with Ubuntu installed):
+#   wsl -d Ubuntu -- bash -lc "./run_wsl.sh"
 
-# Copy latest source from Windows
-cp /mnt/c/Users/mahmo/Desktop/Graphics\ test/ChronoHeist.cpp ~/ChronoHeist.cpp
+set -euo pipefail
 
-# Compile
-echo "Compiling Chrono Heist..."
-g++ -o ChronoHeist ~/ChronoHeist.cpp -lGL -lGLU -lglut -lm
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
-if [ $? -eq 0 ]; then
-    echo "Compilation successful!"
-    echo "Running game..."
-    DISPLAY=:0 ./ChronoHeist
+echo "Compiling Chrono Heist from $SCRIPT_DIR ..."
+g++ -std=c++17 -O2 ChronoHeist.cpp -o ChronoHeist -lGL -lGLU -lglut -lm
+
+echo "Compilation successful."
+
+if [ -z "${DISPLAY:-}" ]; then
+    cat <<'EOF'
+DISPLAY is not set, so the game will not auto-run.
+Start your Windows X server (e.g. VcXsrv), export DISPLAY (for example: export DISPLAY=:0),
+then run ./ChronoHeist from this directory when ready.
+EOF
 else
-    echo "Compilation failed! Check for errors above."
-    echo "Make sure you have GLUT and OpenGL libraries installed."
+    echo "Running game..."
+    ./ChronoHeist
 fi
 
