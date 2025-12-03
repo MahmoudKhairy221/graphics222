@@ -27,6 +27,32 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+
+// MinGW compatibility: provide _wopen implementation
+#if defined(__MINGW32__) || defined(__MINGW64__)
+#include <io.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <stdarg.h>
+
+// Implement _wopen for MinGW by converting wchar_t path to narrow char
+static int _wopen(const wchar_t* wpath, int flags, ...) {
+    char path[2048];
+    size_t len = wcstombs(path, wpath, sizeof(path) - 1);
+    if (len == (size_t)-1) return -1;
+    path[len] = '\0';
+    
+    if (flags & _O_CREAT) {
+        va_list args;
+        va_start(args, flags);
+        int mode = va_arg(args, int);
+        va_end(args);
+        return open(path, flags, mode);
+    }
+    return open(path, flags);
+}
+#endif
+
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NOEXCEPTION
 #include "third_party/tiny_gltf.h"
@@ -559,12 +585,11 @@ TextureResource loadTextureFromFile(const std::string& path) {
 
     glGenTextures(1, &tex.id);
     glBindTexture(GL_TEXTURE_2D, tex.id);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGBA, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
     tex.width = width;
     tex.height = height;
@@ -591,12 +616,11 @@ TextureResource textureFromTinyImage(const tinygltf::Image& image) {
 
     glGenTextures(1, &tex.id);
     glBindTexture(GL_TEXTURE_2D, tex.id);
-    glTexImage2D(GL_TEXTURE_2D, 0, format, image.width, image.height, 0, format, GL_UNSIGNED_BYTE, image.image.data());
-    glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gluBuild2DMipmaps(GL_TEXTURE_2D, format, image.width, image.height, format, GL_UNSIGNED_BYTE, image.image.data());
 
     tex.width = image.width;
     tex.height = image.height;
