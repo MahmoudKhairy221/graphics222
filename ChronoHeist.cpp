@@ -27,32 +27,6 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-
-// MinGW compatibility: provide _wopen implementation
-#if defined(__MINGW32__) || defined(__MINGW64__)
-#include <io.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <stdarg.h>
-
-// Implement _wopen for MinGW by converting wchar_t path to narrow char
-static int _wopen(const wchar_t* wpath, int flags, ...) {
-    char path[2048];
-    size_t len = wcstombs(path, wpath, sizeof(path) - 1);
-    if (len == (size_t)-1) return -1;
-    path[len] = '\0';
-    
-    if (flags & _O_CREAT) {
-        va_list args;
-        va_start(args, flags);
-        int mode = va_arg(args, int);
-        va_end(args);
-        return open(path, flags, mode);
-    }
-    return open(path, flags);
-}
-#endif
-
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NOEXCEPTION
 #include "third_party/tiny_gltf.h"
@@ -310,7 +284,10 @@ public:
     }
 
     void move(Vector3f direction) {
+        // Movement is relative to where the player is facing
+        // player.yaw is updated by mouse movement, so player rotates with camera
         // Forward is positive Z (standard OpenGL convention)
+        // Calculate forward and right vectors based on current yaw (where player is facing)
         Vector3f forward = Vector3f(sin(DEG2RAD(yaw)), 0, cos(DEG2RAD(yaw)));
         Vector3f right = Vector3f(cos(DEG2RAD(yaw)), 0, -sin(DEG2RAD(yaw)));
         
@@ -319,6 +296,9 @@ public:
             direction = direction.unit();
         }
         
+        // Apply movement relative to player facing direction:
+        // direction.z = forward/backward (W/S keys) - moves in direction player is facing
+        // direction.x = left/right (A/D keys) - strafes left/right relative to facing direction
         Vector3f moveDir = (forward * direction.z + right * direction.x) * PLAYER_SPEED;
         velocity.x = moveDir.x;
         velocity.z = moveDir.z;
@@ -365,8 +345,9 @@ public:
                 cos(radYaw) * cos(radPitch) * forwardDist
             );
         } else {
-            // Third-person: camera follows behind player
-            float radYaw = DEG2RAD(player.yaw + 180);  // Behind player
+            // Third-person: camera orbits around player
+            // angleX controls horizontal orbit, angleY controls vertical angle
+            float radYaw = DEG2RAD(player.yaw + angleX + 180);  // Behind player + orbit angle
             float radPitch = DEG2RAD(angleY);
             
             // Calculate camera offset
@@ -885,6 +866,65 @@ void drawCube(float size) {
     glEnd();
 }
 
+void drawPyramid(float baseSize, float height) {
+    float s = baseSize * 0.5f;
+    float h = height;
+    float texScale = 2.0f;  // Texture repeat scale for pyramid faces
+    
+    glBegin(GL_TRIANGLES);
+    // Base (square base made of 2 triangles)
+    glNormal3f(0, -1, 0);
+    glTexCoord2f(0, 0); glVertex3f(-s, 0, -s);
+    glTexCoord2f(texScale, 0); glVertex3f(s, 0, -s);
+    glTexCoord2f(texScale, texScale); glVertex3f(s, 0, s);
+    
+    glTexCoord2f(0, 0); glVertex3f(-s, 0, -s);
+    glTexCoord2f(texScale, texScale); glVertex3f(s, 0, s);
+    glTexCoord2f(0, texScale); glVertex3f(-s, 0, s);
+    
+    // Front face
+    Vector3f v1(-s, 0, s);
+    Vector3f v2(s, 0, s);
+    Vector3f v3(0, h, 0);
+    Vector3f normal = (v2 - v1).cross(v3 - v1).unit();
+    glNormal3f(normal.x, normal.y, normal.z);
+    glTexCoord2f(0, 0); glVertex3f(-s, 0, s);
+    glTexCoord2f(texScale, 0); glVertex3f(s, 0, s);
+    glTexCoord2f(texScale * 0.5f, texScale); glVertex3f(0, h, 0);
+    
+    // Back face
+    v1 = Vector3f(s, 0, -s);
+    v2 = Vector3f(-s, 0, -s);
+    v3 = Vector3f(0, h, 0);
+    normal = (v2 - v1).cross(v3 - v1).unit();
+    glNormal3f(normal.x, normal.y, normal.z);
+    glTexCoord2f(0, 0); glVertex3f(s, 0, -s);
+    glTexCoord2f(texScale, 0); glVertex3f(-s, 0, -s);
+    glTexCoord2f(texScale * 0.5f, texScale); glVertex3f(0, h, 0);
+    
+    // Right face
+    v1 = Vector3f(s, 0, s);
+    v2 = Vector3f(s, 0, -s);
+    v3 = Vector3f(0, h, 0);
+    normal = (v2 - v1).cross(v3 - v1).unit();
+    glNormal3f(normal.x, normal.y, normal.z);
+    glTexCoord2f(0, 0); glVertex3f(s, 0, s);
+    glTexCoord2f(texScale, 0); glVertex3f(s, 0, -s);
+    glTexCoord2f(texScale * 0.5f, texScale); glVertex3f(0, h, 0);
+    
+    // Left face
+    v1 = Vector3f(-s, 0, -s);
+    v2 = Vector3f(-s, 0, s);
+    v3 = Vector3f(0, h, 0);
+    normal = (v2 - v1).cross(v3 - v1).unit();
+    glNormal3f(normal.x, normal.y, normal.z);
+    glTexCoord2f(0, 0); glVertex3f(-s, 0, -s);
+    glTexCoord2f(texScale, 0); glVertex3f(-s, 0, s);
+    glTexCoord2f(texScale * 0.5f, texScale); glVertex3f(0, h, 0);
+    
+    glEnd();
+}
+
 void drawSphere(float radius, int slices, int stacks) {
     GLUquadric* quad = gluNewQuadric();
     gluSphere(quad, radius, slices, stacks);
@@ -992,16 +1032,21 @@ void drawGoldenScarab(Vector3f pos, float rotation, float bob) {
 
 void drawPlayer() {
     glPushMatrix();
+    // Translate to player position first
     glTranslatef(player.position.x, player.position.y, player.position.z);
-    glRotatef(player.yaw, 0, 1, 0);
+    // Rotate player to match camera direction (player.yaw is updated by mouse movement)
+    // This makes the player rotate with the camera when you move the mouse
+    glRotatef(player.yaw, 0, 1, 0);  // Rotate around Y-axis (vertical) by player.yaw degrees
 
     if (mainCharacterMesh.loaded) {
+        // For GLTF model: scale, then center, then draw
         glScalef(mainCharacterMesh.scale, mainCharacterMesh.scale, mainCharacterMesh.scale);
         glTranslatef(-mainCharacterMesh.boundsCenter.x,
                      -mainCharacterMesh.boundsCenter.y,
                      -mainCharacterMesh.boundsCenter.z);
         drawLoadedCharacter();
     } else {
+        // Fallback capsule player - rotation is already applied above
         glColor3f(0.2f, 0.4f, 0.8f);
         
         // Body
@@ -1408,16 +1453,19 @@ void drawTempleEnvironment() {
         glPopMatrix();
     }
 
-    // Sarcophagi (decorative)
+    // Pyramids (decorative) - using temple texture, larger size, darker color
+    useTexture(templeSurface);
     for (int i = 0; i < 4; i++) {
         float x = -20.0f + (i % 2) * 40.0f;
         float z = -20.0f + (i / 2) * 40.0f;
         glPushMatrix();
-        glTranslatef(x, 1.0f, z);
-        glColor3f(0.5f, 0.4f, 0.3f);
-        drawCube(2.0f);
+        glTranslatef(x, 0.0f, z);  // Base at ground level
+        glColor3f(0.5f, 0.5f, 0.5f);  // Darker color to make texture appear darker
+        drawPyramid(5.0f, 6.0f);  // Larger: base size 5.0, height 6.0
         glPopMatrix();
     }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
 
     // Draw collectibles
     for (size_t i = 0; i < scarabs.size(); i++) {
@@ -1931,15 +1979,18 @@ void updateGame(float deltaTime) {
     // Update lighting
     lighting.update(deltaTime);
 
-    // Update player movement - fixed directions
-    // W = forward, S = backward, A = left, D = right
+    // Update player movement - relative to where player is facing
+    // The player rotates with the camera (player.yaw is updated by mouse movement)
+    // W = forward (in direction player is facing), S = backward, A = left, D = right
     Vector3f moveDir(0, 0, 0);
-    if (keys['W'] || keys['w'] || keys[GLUT_KEY_UP]) moveDir.z = 1.0f;   // Forward
-    if (keys['S'] || keys['s'] || keys[GLUT_KEY_DOWN]) moveDir.z = -1.0f; // Backward
-    if (keys['A'] || keys['a'] || keys[GLUT_KEY_LEFT]) moveDir.x = -1.0f;  // Left
-    if (keys['D'] || keys['d'] || keys[GLUT_KEY_RIGHT]) moveDir.x = 1.0f;  // Right
+    if (keys['W'] || keys['w'] || keys[GLUT_KEY_UP]) moveDir.z = 1.0f;   // Forward (relative to player.yaw)
+    if (keys['S'] || keys['s'] || keys[GLUT_KEY_DOWN]) moveDir.z = -1.0f; // Backward (relative to player.yaw)
+    if (keys['A'] || keys['a'] || keys[GLUT_KEY_LEFT]) moveDir.x = -1.0f;  // Left (relative to player.yaw)
+    if (keys['D'] || keys['d'] || keys[GLUT_KEY_RIGHT]) moveDir.x = 1.0f;  // Right (relative to player.yaw)
     
     if (moveDir.lengthSquared() > 0.0001f) {
+        // Player::move() converts input direction to world space based on player.yaw
+        // Since player.yaw rotates with camera, movement is relative to where player is facing
         player.move(moveDir);
     }
     
@@ -2068,23 +2119,52 @@ void mouseMotion(int x, int y) {
     int dy = y - lastMouseY;
     
     // Smooth mouse sensitivity - reduced for easier control
-    float sensitivity = 0.15f;  // Reduced from 0.3f
+    float sensitivity = 0.1f;  // Camera rotation sensitivity
     
-    // Rotate horizontally (yaw) - normal direction
-    player.yaw += dx * sensitivity;
+    // Check if mouse button is held down (works in both first-person and third-person modes)
+    bool mouseHeld = mouseButtons[GLUT_LEFT_BUTTON] || mouseButtons[GLUT_RIGHT_BUTTON] || mouseButtons[GLUT_MIDDLE_BUTTON];
     
-    // Rotate vertically (pitch) - inverted for natural feel
-    player.pitch += dy * sensitivity;  // Inverted: moving mouse up looks up
-    
-    // Clamp pitch to prevent flipping
-    if (player.pitch > 89.0f) player.pitch = 89.0f;
-    if (player.pitch < -89.0f) player.pitch = -89.0f;
-    
-    // Update third-person camera angle
-    if (camera.mode == CAMERA_THIRD_PERSON) {
-        camera.angleY += dy * sensitivity * 0.3f;  // Reduced sensitivity
-        if (camera.angleY > 45.0f) camera.angleY = 45.0f;
-        if (camera.angleY < -45.0f) camera.angleY = -45.0f;
+    if (mouseHeld) {
+        // Mouse button held: Rotate the PLAYER (works in both first-person and third-person)
+        player.yaw += dx * sensitivity;
+        
+        // Wrap yaw to keep it in reasonable range (prevents overflow)
+        while (player.yaw > 360.0f) player.yaw -= 360.0f;
+        while (player.yaw < 0.0f) player.yaw += 360.0f;
+        
+        // Also update pitch when rotating player
+        player.pitch += dy * sensitivity;
+        
+        // Clamp pitch to prevent flipping
+        if (player.pitch > 89.0f) player.pitch = 89.0f;
+        if (player.pitch < -89.0f) player.pitch = -89.0f;
+        
+        // In third-person, also update camera angle to follow player rotation
+        if (camera.mode == CAMERA_THIRD_PERSON) {
+            // Camera follows player rotation, so angleX stays relative to player
+            // No need to update angleX here since it's relative to player.yaw
+        }
+    } else {
+        // No mouse button: Rotate only the CAMERA (not the player)
+        // This works differently in first-person vs third-person
+        if (camera.mode == CAMERA_THIRD_PERSON) {
+            // In third-person, adjust camera angle around player (orbit camera)
+            camera.angleX += dx * sensitivity;
+            // Wrap angleX to keep it in reasonable range
+            while (camera.angleX > 360.0f) camera.angleX -= 360.0f;
+            while (camera.angleX < 0.0f) camera.angleX += 360.0f;
+            
+            camera.angleY += dy * sensitivity * 0.3f;
+            if (camera.angleY > 45.0f) camera.angleY = 45.0f;
+            if (camera.angleY < -45.0f) camera.angleY = -45.0f;
+        } else {
+            // In first-person, only update pitch for camera look direction
+            // Don't update player.yaw - this keeps player facing same direction
+            player.pitch += dy * sensitivity;
+            if (player.pitch > 89.0f) player.pitch = 89.0f;
+            if (player.pitch < -89.0f) player.pitch = -89.0f;
+            // Horizontal camera rotation follows player.yaw in first-person, so no change needed
+        }
     }
     
     lastMouseX = x;
