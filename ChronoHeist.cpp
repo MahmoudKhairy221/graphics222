@@ -104,8 +104,8 @@ const int MAX_SCARABS = 6;
 
 // Camera distances
 const float FIRST_PERSON_DISTANCE = 0.0f;
-const float THIRD_PERSON_DISTANCE = 5.0f;
-const float THIRD_PERSON_HEIGHT = 2.0f;
+const float THIRD_PERSON_DISTANCE = 8.0f;   // Distance behind player
+const float THIRD_PERSON_HEIGHT = 3.0f;     // Height above player
 
 const char* TEXTURE_DIR = "textures/";
 const char* MODERN_TOKYO_BASE = "textures/modern_tokyo/basecolor.png";
@@ -219,12 +219,19 @@ enum CameraMode {
 // =============================================================================
 // Player Class
 // =============================================================================
+// The player has:
+// - position: world position
+// - yaw: the direction the player MODEL is facing (updated when moving)
+// - pitch: vertical look angle (used in first-person mode)
+// - facingYaw: smoothly interpolated facing direction for model rotation
+// =============================================================================
 class Player {
 public:
     Vector3f position;
     Vector3f velocity;
-    float yaw;          // Horizontal rotation
-    float pitch;        // Vertical rotation
+    float yaw;          // Direction player model is facing (degrees, 0 = +Z)
+    float pitch;        // Vertical rotation (for first-person look)
+    float targetYaw;    // Target yaw for smooth rotation
     bool onGround;
     int health;
     int score;
@@ -234,8 +241,9 @@ public:
     Player() {
         position = Vector3f(0, 2, 0);
         velocity = Vector3f(0, 0, 0);
-        yaw = 0.0f;  // Facing forward (positive Z direction)
-        pitch = 0.0f;  // Look straight ahead initially
+        yaw = 0.0f;       // Facing forward (positive Z direction)
+        targetYaw = 0.0f;
+        pitch = 0.0f;     // Look straight ahead initially
         onGround = true;
         health = MAX_HEALTH;
         score = 0;
@@ -274,6 +282,17 @@ public:
         // Damping
         velocity.x *= 0.9f;
         velocity.z *= 0.9f;
+        
+        // Smoothly interpolate yaw towards targetYaw for smooth model rotation
+        float yawDiff = targetYaw - yaw;
+        // Handle wrap-around (e.g., going from 350 to 10 degrees)
+        while (yawDiff > 180.0f) yawDiff -= 360.0f;
+        while (yawDiff < -180.0f) yawDiff += 360.0f;
+        yaw += yawDiff * 0.15f;  // Smooth rotation (adjust 0.15 for speed)
+        
+        // Keep yaw in 0-360 range
+        while (yaw > 360.0f) yaw -= 360.0f;
+        while (yaw < 0.0f) yaw += 360.0f;
     }
 
     void jump() {
@@ -283,94 +302,160 @@ public:
         }
     }
 
-    void move(Vector3f direction) {
-        // Movement is relative to where the player is facing
-        // player.yaw is updated by mouse movement, so player rotates with camera
-        // Forward is positive Z (standard OpenGL convention)
-        // Calculate forward and right vectors based on current yaw (where player is facing)
-        Vector3f forward = Vector3f(sin(DEG2RAD(yaw)), 0, cos(DEG2RAD(yaw)));
-        Vector3f right = Vector3f(cos(DEG2RAD(yaw)), 0, -sin(DEG2RAD(yaw)));
-        
+    // Move the player based on input direction and camera orientation
+    // direction.z = forward/backward input (-1 to 1)
+    // direction.x = left/right input (-1 to 1)
+    // cameraForward and cameraRight are the camera's facing directions
+    void moveRelativeToCamera(Vector3f direction, Vector3f cameraForward, Vector3f cameraRight) {
         // Normalize direction for consistent speed
         if (direction.lengthSquared() > 0.0001f) {
             direction = direction.unit();
         }
         
-        // Apply movement relative to player facing direction:
-        // direction.z = forward/backward (W/S keys) - moves in direction player is facing
-        // direction.x = left/right (A/D keys) - strafes left/right relative to facing direction
-        Vector3f moveDir = (forward * direction.z + right * direction.x) * PLAYER_SPEED;
+        // Calculate world-space movement direction based on camera orientation
+        // W/S (direction.z) moves in camera's forward/backward direction
+        // A/D (direction.x) moves in camera's left/right direction
+        Vector3f moveDir = (cameraForward * direction.z + cameraRight * direction.x) * PLAYER_SPEED;
+        
+        // Apply velocity
         velocity.x = moveDir.x;
         velocity.z = moveDir.z;
+        
+        // Update player's facing direction to match movement direction
+        // Only update if actually moving
+        if (moveDir.lengthSquared() > 0.0001f) {
+            // Calculate the angle from the movement direction
+            // atan2 gives angle in radians, convert to degrees
+            targetYaw = RAD2DEG(atan2(moveDir.x, moveDir.z));
+            
+            // Keep targetYaw in 0-360 range
+            while (targetYaw < 0.0f) targetYaw += 360.0f;
+            while (targetYaw > 360.0f) targetYaw -= 360.0f;
+        }
     }
 };
 
 // =============================================================================
-// Camera Class
+// Camera Class - Third-Person Camera System
+// =============================================================================
+// The camera orbits around the player based on mouse input (cameraYaw, cameraPitch).
+// Movement is relative to the camera's facing direction, not global axes.
+// The player model rotates to face the direction of movement.
 // =============================================================================
 class Camera {
 public:
     CameraMode mode;
-    Vector3f eye;
-    Vector3f center;
-    Vector3f up;
-    float distance;
-    float angleX;
-    float angleY;
+    Vector3f eye;           // Camera position in world space
+    Vector3f center;        // Point the camera looks at (player position)
+    Vector3f up;            // Up vector (always 0,1,0)
+    
+    // Camera orbit angles (controlled by mouse)
+    float cameraYaw;        // Horizontal rotation around player (0-360 degrees)
+    float cameraPitch;      // Vertical angle (-60 to 60 degrees)
+    
+    // Camera distance settings
+    float distance;         // Distance from player
+    float height;           // Height offset above player
+    
+    // Smoothing factor for camera movement (0-1, higher = smoother)
+    float smoothFactor;
 
     Camera() {
-        mode = CAMERA_THIRD_PERSON;  // Start in third-person for better overview
+        mode = CAMERA_THIRD_PERSON;
         eye = Vector3f(0, 8, 10);
         center = Vector3f(0, 2, 0);
         up = Vector3f(0, 1, 0);
+        
+        // Initialize camera orbit angles
+        cameraYaw = 0.0f;       // Start looking at player from behind (0 = behind player)
+        cameraPitch = 20.0f;    // Slight downward angle for better view
+        
+        // Camera positioning
         distance = THIRD_PERSON_DISTANCE;
-        angleX = 0.0f;
-        angleY = -15.0f;  // Look down slightly for better view
+        height = THIRD_PERSON_HEIGHT;
+        
+        smoothFactor = 0.1f;
+    }
+
+    // Get the forward direction vector based on camera yaw (for movement)
+    // This is the direction the camera is facing in the XZ plane
+    Vector3f getForwardDirection() {
+        float radYaw = DEG2RAD(cameraYaw);
+        // Forward is the direction FROM camera TO player (negative of camera offset direction)
+        return Vector3f(-sin(radYaw), 0, -cos(radYaw));
+    }
+    
+    // Get the right direction vector based on camera yaw (for strafing)
+    // Perpendicular to forward in the XZ plane
+    Vector3f getRightDirection() {
+        float radYaw = DEG2RAD(cameraYaw);
+        // Right is 90 degrees rotated from forward (fixed: was inverted)
+        return Vector3f(cos(radYaw), 0, -sin(radYaw));
     }
 
     void update(Player& player) {
         if (mode == CAMERA_FIRST_PERSON) {
-            // First-person: camera at player eye level
-            eye = player.position + Vector3f(0, PLAYER_HEIGHT * 0.4f, 0);
+            // =========================================
+            // FIRST-PERSON CAMERA
+            // =========================================
+            // Camera is at player's eye level, looking in player's facing direction
+            eye = player.position + Vector3f(0, PLAYER_HEIGHT * 0.9f, 0);
             
-            // Calculate look direction from player yaw and pitch
             float radYaw = DEG2RAD(player.yaw);
             float radPitch = DEG2RAD(player.pitch);
             
-            // Forward direction based on yaw and pitch
-            float forwardDist = 5.0f;  // Look distance
+            // Look direction based on player yaw and pitch
+            float forwardDist = 5.0f;
             center = eye + Vector3f(
                 sin(radYaw) * cos(radPitch) * forwardDist,
                 sin(radPitch) * forwardDist,
                 cos(radYaw) * cos(radPitch) * forwardDist
             );
         } else {
-            // Third-person: camera orbits around player
-            // angleX controls horizontal orbit, angleY controls vertical angle
-            float radYaw = DEG2RAD(player.yaw + angleX + 180);  // Behind player + orbit angle
-            float radPitch = DEG2RAD(angleY);
+            // =========================================
+            // THIRD-PERSON CAMERA (Main Implementation)
+            // =========================================
+            // Camera orbits around player based on cameraYaw and cameraPitch
+            // The camera stays a fixed distance behind and above the player
             
-            // Calculate camera offset
-            float camDistance = distance;
-            float camHeight = THIRD_PERSON_HEIGHT + sin(radPitch) * 2.0f;
+            // Convert angles to radians
+            float radYaw = DEG2RAD(cameraYaw);
+            float radPitch = DEG2RAD(cameraPitch);
             
-            Vector3f offset = Vector3f(
-                sin(radYaw) * cos(radPitch) * camDistance,
-                camHeight,
-                cos(radYaw) * cos(radPitch) * camDistance
+            // Calculate camera position relative to player
+            // Camera is positioned on a sphere around the player
+            // cameraYaw rotates around Y axis, cameraPitch tilts up/down
+            
+            // Horizontal distance from player (affected by pitch)
+            float horizontalDist = distance * cos(radPitch);
+            
+            // Vertical offset (height above player + pitch adjustment)
+            float verticalOffset = height + distance * sin(radPitch);
+            
+            // Calculate camera offset from player position
+            // Camera is BEHIND player in the direction of cameraYaw
+            Vector3f cameraOffset = Vector3f(
+                sin(radYaw) * horizontalDist,    // X offset
+                verticalOffset,                   // Y offset (height)
+                cos(radYaw) * horizontalDist     // Z offset
             );
             
-            eye = player.position + offset;
+            // Set camera eye position (with optional smoothing)
+            Vector3f targetEye = player.position + cameraOffset;
+            eye = targetEye;  // Direct positioning (can add smoothing here if desired)
             
-            // Look at player with slight offset upward
+            // Camera looks at the player (slightly above ground for better framing)
             center = player.position + Vector3f(0, PLAYER_HEIGHT * 0.5f, 0);
         }
     }
 
+    // Apply the camera view using gluLookAt
     void look() {
-        gluLookAt(eye.x, eye.y, eye.z,
-                  center.x, center.y, center.z,
-                  up.x, up.y, up.z);
+        gluLookAt(
+            eye.x, eye.y, eye.z,        // Camera position
+            center.x, center.y, center.z, // Look-at point (player)
+            up.x, up.y, up.z            // Up vector
+        );
     }
 
     void toggleMode() {
@@ -1031,34 +1116,108 @@ void drawGoldenScarab(Vector3f pos, float rotation, float bob) {
 }
 
 void drawPlayer() {
+    // Only draw player in third-person mode
+    if (camera.mode == CAMERA_FIRST_PERSON) {
+        return;
+    }
+    
     glPushMatrix();
-    // Translate to player position first
+    // Translate to player position
     glTranslatef(player.position.x, player.position.y, player.position.z);
-    // Rotate player to match camera direction (player.yaw is updated by mouse movement)
-    // This makes the player rotate with the camera when you move the mouse
-    glRotatef(player.yaw, 0, 1, 0);  // Rotate around Y-axis (vertical) by player.yaw degrees
+    
+    // Rotate player to face the direction they're moving (yaw angle)
+    // player.yaw is smoothly updated in Player::update() to face movement direction
+    glRotatef(player.yaw + 180.0f, 0, 1, 0);  // Rotate around Y-axis (+180 to face forward)
 
     if (mainCharacterMesh.loaded) {
-        // For GLTF model: scale, then center, then draw
-        glScalef(mainCharacterMesh.scale, mainCharacterMesh.scale, mainCharacterMesh.scale);
+        // For GLTF model: Apply proper transformations
+        
+        // Scale the model to fit player height
+        float modelScale = mainCharacterMesh.scale * 1.0f;
+        glScalef(modelScale, modelScale, modelScale);
+        
+        // Rotate model to face forward (+Z direction in our game)
+        // Most GLTF models are exported facing -Z or +X, so we rotate 180 degrees
+        glRotatef(180.0f, 0, 1, 0);
+        
+        // Center the model horizontally and place feet at origin
         glTranslatef(-mainCharacterMesh.boundsCenter.x,
-                     -mainCharacterMesh.boundsCenter.y,
+                     -mainCharacterMesh.boundsMin.y,  // Place feet at ground level
                      -mainCharacterMesh.boundsCenter.z);
+        
+        // Draw the character model
         drawLoadedCharacter();
     } else {
-        // Fallback capsule player - rotation is already applied above
+        // Fallback: Simple humanoid character with higher poly count
+        
+        // Body color
         glColor3f(0.2f, 0.4f, 0.8f);
         
-        // Body
+        // Torso (cylinder-like, higher poly)
         glPushMatrix();
-        glTranslatef(0, 0.5f, 0);
-        drawCube(0.6f);
+        glTranslatef(0, 0.9f, 0);
+        glScalef(0.35f, 0.5f, 0.2f);
+        glutSolidSphere(1.0f, 16, 16);  // Higher poly sphere for torso
         glPopMatrix();
-
+        
         // Head
         glPushMatrix();
-        glTranslatef(0, 1.2f, 0);
-        drawSphere(0.3f, 12, 12);
+        glTranslatef(0, 1.6f, 0);
+        glColor3f(0.9f, 0.75f, 0.6f);  // Skin color
+        glutSolidSphere(0.2f, 16, 16);  // Higher poly head
+        glPopMatrix();
+        
+        // Neck
+        glPushMatrix();
+        glTranslatef(0, 1.35f, 0);
+        glColor3f(0.9f, 0.75f, 0.6f);
+        glScalef(0.08f, 0.1f, 0.08f);
+        glutSolidSphere(1.0f, 12, 12);
+        glPopMatrix();
+        
+        // Left arm
+        glPushMatrix();
+        glTranslatef(-0.45f, 0.95f, 0);
+        glColor3f(0.2f, 0.4f, 0.8f);
+        glScalef(0.1f, 0.35f, 0.1f);
+        glutSolidSphere(1.0f, 12, 12);
+        glPopMatrix();
+        
+        // Right arm
+        glPushMatrix();
+        glTranslatef(0.45f, 0.95f, 0);
+        glScalef(0.1f, 0.35f, 0.1f);
+        glutSolidSphere(1.0f, 12, 12);
+        glPopMatrix();
+        
+        // Left leg
+        glPushMatrix();
+        glTranslatef(-0.15f, 0.35f, 0);
+        glColor3f(0.15f, 0.15f, 0.3f);  // Darker pants color
+        glScalef(0.12f, 0.4f, 0.12f);
+        glutSolidSphere(1.0f, 12, 12);
+        glPopMatrix();
+        
+        // Right leg
+        glPushMatrix();
+        glTranslatef(0.15f, 0.35f, 0);
+        glScalef(0.12f, 0.4f, 0.12f);
+        glutSolidSphere(1.0f, 12, 12);
+        glPopMatrix();
+        
+        // Face direction indicator (eyes looking forward)
+        glPushMatrix();
+        glColor3f(1.0f, 1.0f, 1.0f);  // White eyes
+        glTranslatef(-0.07f, 1.63f, 0.15f);
+        glutSolidSphere(0.04f, 8, 8);
+        glTranslatef(0.14f, 0, 0);
+        glutSolidSphere(0.04f, 8, 8);
+        // Pupils
+        glColor3f(0.1f, 0.1f, 0.1f);
+        glTranslatef(-0.14f, 0, 0.03f);
+        glutSolidSphere(0.02f, 6, 6);
+        glTranslatef(0.14f, 0, 0);
+        glutSolidSphere(0.02f, 6, 6);
         glPopMatrix();
     }
 
@@ -1746,22 +1905,25 @@ void initializeNeoTokyo() {
     crystals.push_back(Collectible(Vector3f(0, 1.5f, -20), 0));
     crystals.push_back(Collectible(Vector3f(0, 1.5f, 20), 0));
     
+    // Reset player position and orientation
     player.position = Vector3f(0, 2, 0);
     player.velocity = Vector3f(0, 0, 0);
     player.yaw = 0.0f;
-    player.pitch = 0.0f;  // Look straight ahead
+    player.targetYaw = 0.0f;
+    player.pitch = 0.0f;
     player.crystalsCollected = 0;
+    
+    // Reset game state
     consoleActivated = false;
     portalUnlocked = false;
     alarmActive = false;
     hitReactionActive = false;
     lighting.currentScene = 0;
     
-    // Initialize camera properly
-    camera.mode = CAMERA_THIRD_PERSON;
-    camera.angleY = -15.0f;  // Slight downward angle
+    // Reset camera (keep current mode, reset angles)
+    camera.cameraYaw = 0.0f;
+    camera.cameraPitch = 20.0f;
     camera.update(player);
-    mouseFirstMove = true;  // Reset mouse tracking
 }
 
 void initializeTemple() {
@@ -1775,19 +1937,22 @@ void initializeTemple() {
     scarabs.push_back(Collectible(Vector3f(0, 1.5f, -25), 1));
     scarabs.push_back(Collectible(Vector3f(0, 1.5f, 25), 1));
     
+    // Reset player position and orientation
     player.position = Vector3f(0, 2, 0);
     player.velocity = Vector3f(0, 0, 0);
     player.yaw = 0.0f;
-    player.pitch = 0.0f;  // Look straight ahead
+    player.targetYaw = 0.0f;
+    player.pitch = 0.0f;
     player.scarabsCollected = 0;
+    
+    // Reset game state
     hitReactionActive = false;
     lighting.currentScene = 1;
     
-    // Initialize camera properly
-    camera.mode = CAMERA_THIRD_PERSON;
-    camera.angleY = -15.0f;  // Slight downward angle
+    // Reset camera (keep current mode, reset angles)
+    camera.cameraYaw = 0.0f;
+    camera.cameraPitch = 20.0f;
     camera.update(player);
-    mouseFirstMove = true;  // Reset mouse tracking
 }
 
 void checkCollectibles() {
@@ -1979,19 +2144,42 @@ void updateGame(float deltaTime) {
     // Update lighting
     lighting.update(deltaTime);
 
-    // Update player movement - relative to where player is facing
-    // The player rotates with the camera (player.yaw is updated by mouse movement)
-    // W = forward (in direction player is facing), S = backward, A = left, D = right
+    // =========================================
+    // PLAYER MOVEMENT - Relative to Camera Direction
+    // =========================================
+    // W = forward in camera's facing direction
+    // S = backward
+    // A = strafe left relative to camera
+    // D = strafe right relative to camera
+    // The player model automatically rotates to face movement direction
+    
     Vector3f moveDir(0, 0, 0);
-    if (keys['W'] || keys['w'] || keys[GLUT_KEY_UP]) moveDir.z = 1.0f;   // Forward (relative to player.yaw)
-    if (keys['S'] || keys['s'] || keys[GLUT_KEY_DOWN]) moveDir.z = -1.0f; // Backward (relative to player.yaw)
-    if (keys['A'] || keys['a'] || keys[GLUT_KEY_LEFT]) moveDir.x = -1.0f;  // Left (relative to player.yaw)
-    if (keys['D'] || keys['d'] || keys[GLUT_KEY_RIGHT]) moveDir.x = 1.0f;  // Right (relative to player.yaw)
+    if (keys['W'] || keys['w'] || keys[GLUT_KEY_UP]) moveDir.z = 1.0f;    // Forward
+    if (keys['S'] || keys['s'] || keys[GLUT_KEY_DOWN]) moveDir.z = -1.0f; // Backward
+    if (keys['A'] || keys['a'] || keys[GLUT_KEY_LEFT]) moveDir.x = -1.0f; // Strafe left
+    if (keys['D'] || keys['d'] || keys[GLUT_KEY_RIGHT]) moveDir.x = 1.0f; // Strafe right
     
     if (moveDir.lengthSquared() > 0.0001f) {
-        // Player::move() converts input direction to world space based on player.yaw
-        // Since player.yaw rotates with camera, movement is relative to where player is facing
-        player.move(moveDir);
+        if (camera.mode == CAMERA_THIRD_PERSON) {
+            // Third-person: Movement is relative to camera direction
+            Vector3f camForward = camera.getForwardDirection();
+            Vector3f camRight = camera.getRightDirection();
+            player.moveRelativeToCamera(moveDir, camForward, camRight);
+        } else {
+            // First-person: Movement is relative to player's look direction
+            float radYaw = DEG2RAD(player.yaw);
+            Vector3f forward = Vector3f(sin(radYaw), 0, cos(radYaw));
+            Vector3f right = Vector3f(cos(radYaw), 0, -sin(radYaw));
+            
+            // In first-person, don't auto-rotate player - they face where they look
+            // Just apply velocity directly
+            if (moveDir.lengthSquared() > 0.0001f) {
+                moveDir = moveDir.unit();
+            }
+            Vector3f worldMoveDir = (forward * moveDir.z + right * moveDir.x) * PLAYER_SPEED;
+            player.velocity.x = worldMoveDir.x;
+            player.velocity.z = worldMoveDir.z;
+        }
     }
     
     if (keys[' ']) {
@@ -2082,6 +2270,22 @@ void keyboard(unsigned char key, int x, int y) {
     keys[key] = true;
     
     if (key == 'c' || key == 'C') {
+        // Sync player/camera orientation when switching modes
+        if (camera.mode == CAMERA_THIRD_PERSON) {
+            // Switching TO first-person: Set player yaw to face camera direction
+            // Player should look in the direction the camera was facing
+            player.yaw = camera.cameraYaw + 180.0f;  // Opposite of camera orbit angle
+            player.targetYaw = player.yaw;
+            while (player.yaw > 360.0f) player.yaw -= 360.0f;
+            while (player.yaw < 0.0f) player.yaw += 360.0f;
+            player.pitch = 0.0f;  // Reset pitch
+        } else {
+            // Switching TO third-person: Set camera to orbit behind player
+            camera.cameraYaw = player.yaw + 180.0f;  // Camera behind player
+            while (camera.cameraYaw > 360.0f) camera.cameraYaw -= 360.0f;
+            while (camera.cameraYaw < 0.0f) camera.cameraYaw += 360.0f;
+            camera.cameraPitch = 20.0f;  // Reset pitch
+        }
         camera.toggleMode();
     }
     
@@ -2092,6 +2296,7 @@ void keyboard(unsigned char key, int x, int y) {
     if (gameState == STATE_MENU && key == ' ') {
         gameState = STATE_NEO_TOKYO;
         initializeNeoTokyo();
+        mouseFirstMove = true;  // Reset mouse tracking when starting
     }
 }
 
@@ -2118,53 +2323,51 @@ void mouseMotion(int x, int y) {
     int dx = x - lastMouseX;
     int dy = y - lastMouseY;
     
-    // Smooth mouse sensitivity - reduced for easier control
-    float sensitivity = 0.1f;  // Camera rotation sensitivity
-    
-    // Check if mouse button is held down (works in both first-person and third-person modes)
-    bool mouseHeld = mouseButtons[GLUT_LEFT_BUTTON] || mouseButtons[GLUT_RIGHT_BUTTON] || mouseButtons[GLUT_MIDDLE_BUTTON];
-    
-    if (mouseHeld) {
-        // Mouse button held: Rotate the PLAYER (works in both first-person and third-person)
+    if (camera.mode == CAMERA_FIRST_PERSON) {
+        // =========================================
+        // FIRST-PERSON: Mouse controls player look direction
+        // =========================================
+        float sensitivity = 0.2f;  // Sensitivity for first-person look
+        
+        // Update player's horizontal look direction (yaw)
+        // Move mouse right = look right (increase yaw)
         player.yaw += dx * sensitivity;
         
-        // Wrap yaw to keep it in reasonable range (prevents overflow)
+        // Update player's vertical look direction (pitch)
+        // Move mouse down = look down (standard FPS controls)
+        player.pitch -= dy * sensitivity;
+        
+        // Wrap yaw to 0-360 range
         while (player.yaw > 360.0f) player.yaw -= 360.0f;
         while (player.yaw < 0.0f) player.yaw += 360.0f;
         
-        // Also update pitch when rotating player
-        player.pitch += dy * sensitivity;
+        // Also update targetYaw to match (prevents snapping when switching modes)
+        player.targetYaw = player.yaw;
         
-        // Clamp pitch to prevent flipping
+        // Clamp pitch to prevent looking too far up/down
         if (player.pitch > 89.0f) player.pitch = 89.0f;
         if (player.pitch < -89.0f) player.pitch = -89.0f;
-        
-        // In third-person, also update camera angle to follow player rotation
-        if (camera.mode == CAMERA_THIRD_PERSON) {
-            // Camera follows player rotation, so angleX stays relative to player
-            // No need to update angleX here since it's relative to player.yaw
-        }
     } else {
-        // No mouse button: Rotate only the CAMERA (not the player)
-        // This works differently in first-person vs third-person
-        if (camera.mode == CAMERA_THIRD_PERSON) {
-            // In third-person, adjust camera angle around player (orbit camera)
-            camera.angleX += dx * sensitivity;
-            // Wrap angleX to keep it in reasonable range
-            while (camera.angleX > 360.0f) camera.angleX -= 360.0f;
-            while (camera.angleX < 0.0f) camera.angleX += 360.0f;
-            
-            camera.angleY += dy * sensitivity * 0.3f;
-            if (camera.angleY > 45.0f) camera.angleY = 45.0f;
-            if (camera.angleY < -45.0f) camera.angleY = -45.0f;
-        } else {
-            // In first-person, only update pitch for camera look direction
-            // Don't update player.yaw - this keeps player facing same direction
-            player.pitch += dy * sensitivity;
-            if (player.pitch > 89.0f) player.pitch = 89.0f;
-            if (player.pitch < -89.0f) player.pitch = -89.0f;
-            // Horizontal camera rotation follows player.yaw in first-person, so no change needed
-        }
+        // =========================================
+        // THIRD-PERSON: Mouse controls camera orbit around player
+        // =========================================
+        float sensitivity = 0.3f;  // Camera orbit sensitivity
+        
+        // Update camera yaw (horizontal orbit around player)
+        // Move mouse right = camera orbits right (clockwise when viewed from above)
+        camera.cameraYaw += dx * sensitivity;
+        
+        // Update camera pitch (vertical angle)
+        // Move mouse up = camera looks more downward (higher pitch)
+        camera.cameraPitch += dy * sensitivity * 0.5f;
+        
+        // Wrap camera yaw to 0-360 range
+        while (camera.cameraYaw > 360.0f) camera.cameraYaw -= 360.0f;
+        while (camera.cameraYaw < 0.0f) camera.cameraYaw += 360.0f;
+        
+        // Clamp camera pitch to prevent flipping
+        if (camera.cameraPitch > 60.0f) camera.cameraPitch = 60.0f;
+        if (camera.cameraPitch < -10.0f) camera.cameraPitch = -10.0f;
     }
     
     lastMouseX = x;
