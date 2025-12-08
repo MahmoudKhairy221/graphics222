@@ -110,7 +110,8 @@ const float THIRD_PERSON_HEIGHT = 3.0f;     // Height above player
 const char* TEXTURE_DIR = "textures/";
 const char* MODERN_TOKYO_BASE = "textures/modern_tokyo/basecolor.png";
 const char* ANCIENT_EGYPT_BASE = "textures/ancient_egypt/basecolor.jpg";
-const char* CHARACTER_SCENE_PATH = "main_character/scene.gltf";
+const char* CHARACTER_MODEL_PATH = "main_character/squall.obj";
+const char* CHARACTER_TEXTURE_PATH = "main_character/ps2021_C01.png";
 
 struct TextureResource {
     GLuint id;
@@ -199,6 +200,58 @@ struct CharacterMeshData {
         loaded = false;
     }
 };
+
+// Generic OBJ Mesh structure for props (scarab, camera, console)
+struct OBJMesh {
+    std::vector<float> positions;
+    std::vector<float> normals;
+    std::vector<float> texcoords;
+    std::vector<unsigned int> indices;
+    TextureResource albedo;
+    Vector3f boundsMin;
+    Vector3f boundsMax;
+    Vector3f boundsCenter;
+    float scale;
+    bool loaded;
+
+    OBJMesh() {
+        boundsMin = Vector3f();
+        boundsMax = Vector3f();
+        boundsCenter = Vector3f();
+        scale = 1.0f;
+        loaded = false;
+    }
+    
+    void computeBounds() {
+        if (positions.empty()) return;
+        boundsMin = Vector3f(positions[0], positions[1], positions[2]);
+        boundsMax = boundsMin;
+        for (size_t i = 0; i < positions.size(); i += 3) {
+            float x = positions[i], y = positions[i + 1], z = positions[i + 2];
+            boundsMin.x = std::min(boundsMin.x, x);
+            boundsMin.y = std::min(boundsMin.y, y);
+            boundsMin.z = std::min(boundsMin.z, z);
+            boundsMax.x = std::max(boundsMax.x, x);
+            boundsMax.y = std::max(boundsMax.y, y);
+            boundsMax.z = std::max(boundsMax.z, z);
+        }
+        boundsCenter = Vector3f(
+            (boundsMin.x + boundsMax.x) * 0.5f,
+            (boundsMin.y + boundsMax.y) * 0.5f,
+            (boundsMin.z + boundsMax.z) * 0.5f
+        );
+    }
+};
+
+// Model paths for props
+const char* SCARAB_MODEL_PATH = "scarabnew/Scarab Beetle/scarab.obj";
+const char* SCARAB_TEXTURE_PATH = "scarabnew/Scarab Beetle/scarab_diff.png";
+const char* CAMERA_MODEL_PATH = "Security Camera/security_camera.obj";
+const char* CAMERA_TEXTURE_PATH = "";  // No texture for now
+const char* CONSOLE_MODEL_PATH = "sci-fi-console/source/OBJECT 9/OBJECT 9.obj";
+const char* CONSOLE_TEXTURE_PATH = "sci-fi-console/source/OBJECT 9/Texture 1.jpg";
+const char* GUARD_MODEL_PATH = "guard/FF07scoc_00.dae";  // DAE format - using texture only for now
+const char* GUARD_TEXTURE_PATH = "guard/FF07scoc_00.png";
 
 // =============================================================================
 // Game State Enumeration
@@ -627,8 +680,13 @@ GameState gameState = STATE_MENU;
 TextureResource fallbackTexture;
 TextureResource neoTokyoSurface;
 TextureResource templeSurface;
+TextureResource guardTexture;  // Texture for security guard
 CharacterMeshData mainCharacterMesh;
+OBJMesh scarabMesh;
+OBJMesh cameraMesh;
+OBJMesh consoleMesh;
 bool textureSystemReady = false;
+bool guardTextureLoaded = false;
 
 // Input state
 bool keys[256];
@@ -662,6 +720,75 @@ std::vector<PickupAnimation> pickupAnimations;
 // Hit reaction state
 float hitReactionTime = 0.0f;
 bool hitReactionActive = false;
+
+// Security Robot struct
+struct SecurityRobot {
+    Vector3f position;
+    Vector3f velocity;
+    float yaw;              // Direction robot is facing
+    float speed;            // Movement speed
+    float damageTimer;      // Cooldown between damage hits
+    bool active;            // Whether robot is currently chasing
+    
+    SecurityRobot() {
+        position = Vector3f(15.0f, GROUND_Y + 1.0f, 15.0f);  // Start position in Neo Tokyo
+        velocity = Vector3f(0, 0, 0);
+        yaw = 0.0f;
+        speed = 0.08f;      // Slightly slower than player
+        damageTimer = 0.0f;
+        active = false;
+    }
+    
+    void update(const Vector3f& playerPos, bool alarmOn, float deltaTime) {
+        if (alarmOn) {
+            active = true;
+            // Calculate direction to player
+            Vector3f toPlayer = playerPos - position;
+            toPlayer.y = 0;  // Keep on ground plane
+            float dist = toPlayer.length();
+            
+            if (dist > 0.1f) {
+                // Normalize and move toward player
+                toPlayer = toPlayer * (1.0f / dist);
+                velocity.x = toPlayer.x * speed;
+                velocity.z = toPlayer.z * speed;
+                
+                // Update facing direction
+                yaw = atan2(toPlayer.x, toPlayer.z) * 180.0f / 3.14159f;
+            }
+            
+            // Apply velocity
+            position = position + velocity;
+            
+            // Keep on ground
+            position.y = GROUND_Y + 1.0f;
+            
+            // Boundary collision
+            if (position.x < WORLD_MIN + 2) position.x = WORLD_MIN + 2;
+            if (position.x > WORLD_MAX - 2) position.x = WORLD_MAX - 2;
+            if (position.z < WORLD_MIN + 2) position.z = WORLD_MIN + 2;
+            if (position.z > WORLD_MAX - 2) position.z = WORLD_MAX - 2;
+            
+            // Update damage timer
+            if (damageTimer > 0) {
+                damageTimer -= deltaTime;
+            }
+        } else {
+            // Stop when alarm is off
+            active = false;
+            velocity = Vector3f(0, 0, 0);
+        }
+    }
+    
+    bool checkCollisionWithPlayer(const Vector3f& playerPos) {
+        float dx = position.x - playerPos.x;
+        float dz = position.z - playerPos.z;
+        float distSq = dx * dx + dz * dz;
+        return distSq < 4.0f;  // Collision radius of 2 units
+    }
+};
+
+SecurityRobot securityRobot;
 
 // =============================================================================
 // Texture & Model Loading Helpers
@@ -755,6 +882,308 @@ bool initializeTextureAssets() {
     return true;
 }
 
+// =============================================================================
+// 4x4 Matrix Structure for Node Transformations
+// =============================================================================
+// Column-major order (OpenGL style): m[col][row]
+// Used for GLTF node hierarchy transformations
+struct Matrix4x4 {
+    float m[16];  // Column-major: [0-3]=col0, [4-7]=col1, [8-11]=col2, [12-15]=col3
+    
+    // Default constructor: Identity matrix
+    Matrix4x4() {
+        // Initialize to identity matrix
+        for (int i = 0; i < 16; i++) m[i] = 0.0f;
+        m[0] = m[5] = m[10] = m[15] = 1.0f;  // Diagonal = 1
+    }
+    
+    // Constructor from array (column-major)
+    Matrix4x4(const float* data) {
+        for (int i = 0; i < 16; i++) m[i] = data[i];
+    }
+    
+    // Constructor from double array (GLTF uses doubles)
+    Matrix4x4(const std::vector<double>& data) {
+        if (data.size() >= 16) {
+            for (int i = 0; i < 16; i++) m[i] = static_cast<float>(data[i]);
+        } else {
+            // Default to identity if data is invalid
+            for (int i = 0; i < 16; i++) m[i] = 0.0f;
+            m[0] = m[5] = m[10] = m[15] = 1.0f;
+        }
+    }
+    
+    // Create identity matrix
+    static Matrix4x4 identity() {
+        return Matrix4x4();
+    }
+    
+    // Create translation matrix
+    static Matrix4x4 translate(float x, float y, float z) {
+        Matrix4x4 result;
+        result.m[12] = x;
+        result.m[13] = y;
+        result.m[14] = z;
+        return result;
+    }
+    
+    // Create scale matrix
+    static Matrix4x4 scale(float x, float y, float z) {
+        Matrix4x4 result;
+        result.m[0] = x;
+        result.m[5] = y;
+        result.m[10] = z;
+        return result;
+    }
+    
+    // Create rotation matrix from quaternion (x, y, z, w)
+    static Matrix4x4 fromQuaternion(float qx, float qy, float qz, float qw) {
+        Matrix4x4 result;
+        
+        float xx = qx * qx, yy = qy * qy, zz = qz * qz;
+        float xy = qx * qy, xz = qx * qz, yz = qy * qz;
+        float wx = qw * qx, wy = qw * qy, wz = qw * qz;
+        
+        result.m[0]  = 1.0f - 2.0f * (yy + zz);
+        result.m[1]  = 2.0f * (xy + wz);
+        result.m[2]  = 2.0f * (xz - wy);
+        result.m[3]  = 0.0f;
+        
+        result.m[4]  = 2.0f * (xy - wz);
+        result.m[5]  = 1.0f - 2.0f * (xx + zz);
+        result.m[6]  = 2.0f * (yz + wx);
+        result.m[7]  = 0.0f;
+        
+        result.m[8]  = 2.0f * (xz + wy);
+        result.m[9]  = 2.0f * (yz - wx);
+        result.m[10] = 1.0f - 2.0f * (xx + yy);
+        result.m[11] = 0.0f;
+        
+        result.m[12] = 0.0f;
+        result.m[13] = 0.0f;
+        result.m[14] = 0.0f;
+        result.m[15] = 1.0f;
+        
+        return result;
+    }
+    
+    // Matrix multiplication: this * other
+    Matrix4x4 operator*(const Matrix4x4& other) const {
+        Matrix4x4 result;
+        for (int i = 0; i < 16; i++) result.m[i] = 0.0f;
+        
+        for (int col = 0; col < 4; col++) {
+            for (int row = 0; row < 4; row++) {
+                for (int k = 0; k < 4; k++) {
+                    result.m[col * 4 + row] += m[k * 4 + row] * other.m[col * 4 + k];
+                }
+            }
+        }
+        return result;
+    }
+    
+    // Transform a 3D point (assumes w=1)
+    Vector3f transformPoint(const Vector3f& p) const {
+        float x = m[0] * p.x + m[4] * p.y + m[8]  * p.z + m[12];
+        float y = m[1] * p.x + m[5] * p.y + m[9]  * p.z + m[13];
+        float z = m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14];
+        float w = m[3] * p.x + m[7] * p.y + m[11] * p.z + m[15];
+        if (fabs(w) > 0.0001f) {
+            x /= w; y /= w; z /= w;
+        }
+        return Vector3f(x, y, z);
+    }
+    
+    // Transform a 3D normal (ignores translation)
+    Vector3f transformNormal(const Vector3f& n) const {
+        float x = m[0] * n.x + m[4] * n.y + m[8]  * n.z;
+        float y = m[1] * n.x + m[5] * n.y + m[9]  * n.z;
+        float z = m[2] * n.x + m[6] * n.y + m[10] * n.z;
+        return Vector3f(x, y, z).unit();
+    }
+    
+    // Apply this matrix to OpenGL (uses glMultMatrixf)
+    void applyToGL() const {
+        glMultMatrixf(m);
+    }
+};
+
+// Global model reference for traverseNode (set during loading)
+static tinygltf::Model* g_currentModel = nullptr;
+
+// Forward declarations for GLTF data reading functions
+bool readAccessorData(const tinygltf::Model& model, const tinygltf::Accessor& accessor, std::vector<float>& outData, int components);
+bool readIndexData(const tinygltf::Model& model, const tinygltf::Accessor& accessor, std::vector<unsigned int>& outData);
+
+// =============================================================================
+// traverseNode - Recursively process GLTF node hierarchy
+// =============================================================================
+// Parameters:
+//   nodeIndex  - Index of the node in the GLTF model's nodes array
+//   parentMatrix - The accumulated transformation matrix from parent nodes
+//                  (defaults to identity matrix if not specified)
+//
+// This function:
+// 1. Computes the node's local transformation from TRS or matrix
+// 2. Multiplies with parent matrix to get world transform
+// 3. If node has a mesh, transforms and stores the mesh data
+// 4. Recursively processes all child nodes
+// =============================================================================
+void traverseNode(int nodeIndex, Matrix4x4 parentMatrix = Matrix4x4::identity()) {
+    if (g_currentModel == nullptr || nodeIndex < 0 || nodeIndex >= (int)g_currentModel->nodes.size()) {
+        return;
+    }
+    
+    const tinygltf::Node& node = g_currentModel->nodes[nodeIndex];
+    
+    // =============================================================================
+    // Step 1: Compute local transformation matrix for this node
+    // =============================================================================
+    Matrix4x4 localMatrix = Matrix4x4::identity();
+    
+    if (!node.matrix.empty() && node.matrix.size() == 16) {
+        // Node has explicit matrix - use it directly
+        localMatrix = Matrix4x4(node.matrix);
+    } else {
+        // Build matrix from Translation, Rotation, Scale (TRS)
+        // Order: localMatrix = T * R * S
+        
+        // Scale
+        Matrix4x4 S = Matrix4x4::identity();
+        if (node.scale.size() == 3) {
+            S = Matrix4x4::scale(
+                static_cast<float>(node.scale[0]),
+                static_cast<float>(node.scale[1]),
+                static_cast<float>(node.scale[2])
+            );
+        }
+        
+        // Rotation (quaternion: x, y, z, w)
+        Matrix4x4 R = Matrix4x4::identity();
+        if (node.rotation.size() == 4) {
+            R = Matrix4x4::fromQuaternion(
+                static_cast<float>(node.rotation[0]),
+                static_cast<float>(node.rotation[1]),
+                static_cast<float>(node.rotation[2]),
+                static_cast<float>(node.rotation[3])
+            );
+        }
+        
+        // Translation
+        Matrix4x4 T = Matrix4x4::identity();
+        if (node.translation.size() == 3) {
+            T = Matrix4x4::translate(
+                static_cast<float>(node.translation[0]),
+                static_cast<float>(node.translation[1]),
+                static_cast<float>(node.translation[2])
+            );
+        }
+        
+        // Combine: T * R * S
+        localMatrix = T * R * S;
+    }
+    
+    // =============================================================================
+    // Step 2: Compute world transformation (parent * local)
+    // =============================================================================
+    Matrix4x4 worldMatrix = parentMatrix * localMatrix;
+    
+    // =============================================================================
+    // Step 3: If this node has a mesh, process it with the world transform
+    // =============================================================================
+    if (node.mesh >= 0 && node.mesh < (int)g_currentModel->meshes.size()) {
+        const tinygltf::Mesh& mesh = g_currentModel->meshes[node.mesh];
+        
+        // Process each primitive in the mesh
+        for (size_t primIdx = 0; primIdx < mesh.primitives.size(); primIdx++) {
+            const tinygltf::Primitive& primitive = mesh.primitives[primIdx];
+            
+            // Get position data
+            auto posIt = primitive.attributes.find("POSITION");
+            if (posIt == primitive.attributes.end()) continue;
+            
+            const tinygltf::Accessor& posAccessor = g_currentModel->accessors[posIt->second];
+            std::vector<float> positions;
+            if (!readAccessorData(*g_currentModel, posAccessor, positions, 3)) continue;
+            
+            // Transform positions by world matrix and add to main mesh
+            size_t baseVertex = mainCharacterMesh.positions.size() / 3;
+            for (size_t i = 0; i < positions.size(); i += 3) {
+                Vector3f pos(positions[i], positions[i + 1], positions[i + 2]);
+                Vector3f transformed = worldMatrix.transformPoint(pos);
+                mainCharacterMesh.positions.push_back(transformed.x);
+                mainCharacterMesh.positions.push_back(transformed.y);
+                mainCharacterMesh.positions.push_back(transformed.z);
+            }
+            
+            // Get and transform normals
+            auto normalIt = primitive.attributes.find("NORMAL");
+            if (normalIt != primitive.attributes.end()) {
+                std::vector<float> normals;
+                if (readAccessorData(*g_currentModel, g_currentModel->accessors[normalIt->second], normals, 3)) {
+                    for (size_t i = 0; i < normals.size(); i += 3) {
+                        Vector3f normal(normals[i], normals[i + 1], normals[i + 2]);
+                        Vector3f transformed = worldMatrix.transformNormal(normal);
+                        mainCharacterMesh.normals.push_back(transformed.x);
+                        mainCharacterMesh.normals.push_back(transformed.y);
+                        mainCharacterMesh.normals.push_back(transformed.z);
+                    }
+                }
+            }
+            
+            // Get texture coordinates (no transformation needed)
+            auto uvIt = primitive.attributes.find("TEXCOORD_0");
+            if (uvIt != primitive.attributes.end()) {
+                std::vector<float> uvs;
+                if (readAccessorData(*g_currentModel, g_currentModel->accessors[uvIt->second], uvs, 2)) {
+                    for (size_t i = 0; i < uvs.size(); i++) {
+                        mainCharacterMesh.texcoords.push_back(uvs[i]);
+                    }
+                }
+            }
+            
+            // Get indices and offset by base vertex
+            if (primitive.indices >= 0) {
+                const tinygltf::Accessor& indexAccessor = g_currentModel->accessors[primitive.indices];
+                std::vector<unsigned int> indices;
+                if (readIndexData(*g_currentModel, indexAccessor, indices)) {
+                    for (size_t i = 0; i < indices.size(); i++) {
+                        mainCharacterMesh.indices.push_back(static_cast<unsigned int>(baseVertex + indices[i]));
+                    }
+                }
+            } else {
+                // No indices - create sequential indices
+                size_t vertexCount = positions.size() / 3;
+                for (size_t i = 0; i < vertexCount; i++) {
+                    mainCharacterMesh.indices.push_back(static_cast<unsigned int>(baseVertex + i));
+                }
+            }
+            
+            // Load texture from material (only for first primitive with texture)
+            if (!mainCharacterMesh.albedo.valid() && primitive.material >= 0 && 
+                primitive.material < (int)g_currentModel->materials.size()) {
+                const auto& material = g_currentModel->materials[primitive.material];
+                if (material.pbrMetallicRoughness.baseColorTexture.index >= 0) {
+                    int texIdx = material.pbrMetallicRoughness.baseColorTexture.index;
+                    if (texIdx < (int)g_currentModel->textures.size()) {
+                        const tinygltf::Texture& tex = g_currentModel->textures[texIdx];
+                        if (tex.source >= 0 && tex.source < (int)g_currentModel->images.size()) {
+                            mainCharacterMesh.albedo = textureFromTinyImage(g_currentModel->images[tex.source]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // =============================================================================
+    // Step 4: Recursively process all child nodes
+    // =============================================================================
+    for (size_t i = 0; i < node.children.size(); i++) {
+        traverseNode(node.children[i], worldMatrix);
+    }
+}
+
 bool readAccessorData(const tinygltf::Model& model, const tinygltf::Accessor& accessor, std::vector<float>& outData, int components) {
     if (accessor.bufferView < 0) return false;
     const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
@@ -798,110 +1227,460 @@ bool readIndexData(const tinygltf::Model& model, const tinygltf::Accessor& acces
     return true;
 }
 
+// =============================================================================
+// OBJ File Loader for Character Model
+// =============================================================================
 bool loadMainCharacterModel() {
-    tinygltf::TinyGLTF loader;
-    tinygltf::Model model;
-    std::string err;
-    std::string warn;
-
-    bool ok = loader.LoadASCIIFromFile(&model, &err, &warn, CHARACTER_SCENE_PATH);
-    if (!warn.empty()) {
-        printf("GLTF warning: %s\n", warn.c_str());
-    }
-    if (!ok) {
-        printf("Failed to load character model: %s\n", err.c_str());
+    FILE* file = fopen(CHARACTER_MODEL_PATH, "r");
+    if (!file) {
+        printf("Failed to open OBJ file: %s\n", CHARACTER_MODEL_PATH);
         return false;
     }
-
-    if (model.meshes.empty()) {
-        printf("Character GLTF has no meshes.\n");
-        return false;
-    }
-
-    const tinygltf::Mesh& mesh = model.meshes[0];
-    if (mesh.primitives.empty()) {
-        printf("Character mesh has no primitives.\n");
-        return false;
-    }
-
-    const tinygltf::Primitive& primitive = mesh.primitives[0];
-    auto posIt = primitive.attributes.find("POSITION");
-    if (posIt == primitive.attributes.end()) {
-        printf("Character mesh missing POSITION data.\n");
-        return false;
-    }
-
-    const tinygltf::Accessor& posAccessor = model.accessors[posIt->second];
-    if (!readAccessorData(model, posAccessor, mainCharacterMesh.positions, 3)) {
-        printf("Failed to read POSITION data.\n");
-        return false;
-    }
-
-    auto normalIt = primitive.attributes.find("NORMAL");
-    if (normalIt != primitive.attributes.end()) {
-        readAccessorData(model, model.accessors[normalIt->second], mainCharacterMesh.normals, 3);
-    }
-
-    auto uvIt = primitive.attributes.find("TEXCOORD_0");
-    if (uvIt != primitive.attributes.end()) {
-        readAccessorData(model, model.accessors[uvIt->second], mainCharacterMesh.texcoords, 2);
-    }
-
-    if (primitive.indices >= 0) {
-        const tinygltf::Accessor& indexAccessor = model.accessors[primitive.indices];
-        readIndexData(model, indexAccessor, mainCharacterMesh.indices);
-    } else {
-        size_t vertexCount = posAccessor.count;
-        mainCharacterMesh.indices.resize(vertexCount);
-        for (size_t i = 0; i < vertexCount; ++i) {
-            mainCharacterMesh.indices[i] = static_cast<unsigned int>(i);
+    
+    // Clear any existing mesh data
+    mainCharacterMesh.positions.clear();
+    mainCharacterMesh.normals.clear();
+    mainCharacterMesh.texcoords.clear();
+    mainCharacterMesh.indices.clear();
+    
+    // Temporary storage for OBJ data
+    std::vector<float> tempPositions;  // v: x, y, z
+    std::vector<float> tempTexcoords;  // vt: u, v
+    std::vector<float> tempNormals;    // vn: nx, ny, nz
+    
+    // Final vertex data (expanded from faces)
+    std::vector<float> finalPositions;
+    std::vector<float> finalTexcoords;
+    std::vector<float> finalNormals;
+    
+    char line[512];
+    while (fgets(line, sizeof(line), file)) {
+        // Skip comments and empty lines
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        
+        // Vertex position: v x y z
+        if (line[0] == 'v' && line[1] == ' ') {
+            float x, y, z;
+            if (sscanf(line, "v %f %f %f", &x, &y, &z) == 3) {
+                tempPositions.push_back(x);
+                tempPositions.push_back(y);
+                tempPositions.push_back(z);
+            }
         }
-    }
-
-    // Compute bounds
-    if (!mainCharacterMesh.positions.empty()) {
-        mainCharacterMesh.boundsMin = Vector3f(mainCharacterMesh.positions[0], mainCharacterMesh.positions[1], mainCharacterMesh.positions[2]);
-        mainCharacterMesh.boundsMax = mainCharacterMesh.boundsMin;
-        for (size_t i = 0; i < mainCharacterMesh.positions.size(); i += 3) {
-            float x = mainCharacterMesh.positions[i];
-            float y = mainCharacterMesh.positions[i + 1];
-            float z = mainCharacterMesh.positions[i + 2];
-            mainCharacterMesh.boundsMin.x = std::min(mainCharacterMesh.boundsMin.x, x);
-            mainCharacterMesh.boundsMin.y = std::min(mainCharacterMesh.boundsMin.y, y);
-            mainCharacterMesh.boundsMin.z = std::min(mainCharacterMesh.boundsMin.z, z);
-            mainCharacterMesh.boundsMax.x = std::max(mainCharacterMesh.boundsMax.x, x);
-            mainCharacterMesh.boundsMax.y = std::max(mainCharacterMesh.boundsMax.y, y);
-            mainCharacterMesh.boundsMax.z = std::max(mainCharacterMesh.boundsMax.z, z);
+        // Texture coordinate: vt u v
+        else if (line[0] == 'v' && line[1] == 't') {
+            float u, v;
+            if (sscanf(line, "vt %f %f", &u, &v) == 2) {
+                tempTexcoords.push_back(u);
+                tempTexcoords.push_back(v);
+            }
         }
-        float height = std::max(0.001f, mainCharacterMesh.boundsMax.y - mainCharacterMesh.boundsMin.y);
-        mainCharacterMesh.scale = PLAYER_HEIGHT / height;
-        mainCharacterMesh.boundsCenter = Vector3f(
-            (mainCharacterMesh.boundsMin.x + mainCharacterMesh.boundsMax.x) * 0.5f,
-            (mainCharacterMesh.boundsMin.y + mainCharacterMesh.boundsMax.y) * 0.5f,
-            (mainCharacterMesh.boundsMin.z + mainCharacterMesh.boundsMax.z) * 0.5f
-        );
-    }
-
-    // Load texture
-    if (primitive.material >= 0 && primitive.material < model.materials.size()) {
-        const auto& material = model.materials[primitive.material];
-        if (material.pbrMetallicRoughness.baseColorTexture.index >= 0) {
-            const tinygltf::Texture& tex = model.textures[material.pbrMetallicRoughness.baseColorTexture.index];
-            if (tex.source >= 0 && tex.source < model.images.size()) {
-                mainCharacterMesh.albedo = textureFromTinyImage(model.images[tex.source]);
+        // Vertex normal: vn nx ny nz
+        else if (line[0] == 'v' && line[1] == 'n') {
+            float nx, ny, nz;
+            if (sscanf(line, "vn %f %f %f", &nx, &ny, &nz) == 3) {
+                tempNormals.push_back(nx);
+                tempNormals.push_back(ny);
+                tempNormals.push_back(nz);
+            }
+        }
+        // Face: f v/vt/vn v/vt/vn v/vt/vn (triangles)
+        // Can also be: f v//vn, f v/vt, f v
+        else if (line[0] == 'f' && line[1] == ' ') {
+            int v[4], vt[4], vn[4];
+            int numVerts = 0;
+            
+            // Initialize to -1 (not present)
+            for (int i = 0; i < 4; i++) { v[i] = vt[i] = vn[i] = -1; }
+            
+            // Try different face formats
+            // Format: f v/vt/vn v/vt/vn v/vt/vn [v/vt/vn]
+            int matches = sscanf(line, "f %d/%d/%d %d/%d/%d %d/%d/%d %d/%d/%d",
+                &v[0], &vt[0], &vn[0], &v[1], &vt[1], &vn[1], 
+                &v[2], &vt[2], &vn[2], &v[3], &vt[3], &vn[3]);
+            
+            if (matches >= 9) {
+                numVerts = matches / 3;
+            } else {
+                // Try format: f v//vn v//vn v//vn
+                matches = sscanf(line, "f %d//%d %d//%d %d//%d %d//%d",
+                    &v[0], &vn[0], &v[1], &vn[1], &v[2], &vn[2], &v[3], &vn[3]);
+                if (matches >= 6) {
+                    numVerts = matches / 2;
+                } else {
+                    // Try format: f v/vt v/vt v/vt
+                    matches = sscanf(line, "f %d/%d %d/%d %d/%d %d/%d",
+                        &v[0], &vt[0], &v[1], &vt[1], &v[2], &vt[2], &v[3], &vt[3]);
+                    if (matches >= 6) {
+                        numVerts = matches / 2;
+                    } else {
+                        // Try format: f v v v
+                        matches = sscanf(line, "f %d %d %d %d", &v[0], &v[1], &v[2], &v[3]);
+                        if (matches >= 3) {
+                            numVerts = matches;
+                        }
+                    }
+                }
+            }
+            
+            // Process triangle(s) from face
+            // First triangle: v[0], v[1], v[2]
+            if (numVerts >= 3) {
+                for (int i = 0; i < 3; i++) {
+                    int posIdx = v[i] - 1;  // OBJ indices are 1-based
+                    int texIdx = vt[i] - 1;
+                    int normIdx = vn[i] - 1;
+                    
+                    // Position (required)
+                    if (posIdx >= 0 && posIdx * 3 + 2 < (int)tempPositions.size()) {
+                        finalPositions.push_back(tempPositions[posIdx * 3]);
+                        finalPositions.push_back(tempPositions[posIdx * 3 + 1]);
+                        finalPositions.push_back(tempPositions[posIdx * 3 + 2]);
+                    } else {
+                        finalPositions.push_back(0); finalPositions.push_back(0); finalPositions.push_back(0);
+                    }
+                    
+                    // Texture coordinate (optional)
+                    if (texIdx >= 0 && texIdx * 2 + 1 < (int)tempTexcoords.size()) {
+                        finalTexcoords.push_back(tempTexcoords[texIdx * 2]);
+                        finalTexcoords.push_back(tempTexcoords[texIdx * 2 + 1]);
+                    } else {
+                        finalTexcoords.push_back(0); finalTexcoords.push_back(0);
+                    }
+                    
+                    // Normal (optional)
+                    if (normIdx >= 0 && normIdx * 3 + 2 < (int)tempNormals.size()) {
+                        finalNormals.push_back(tempNormals[normIdx * 3]);
+                        finalNormals.push_back(tempNormals[normIdx * 3 + 1]);
+                        finalNormals.push_back(tempNormals[normIdx * 3 + 2]);
+                    } else {
+                        finalNormals.push_back(0); finalNormals.push_back(1); finalNormals.push_back(0);
+                    }
+                }
+            }
+            
+            // Second triangle for quad: v[0], v[2], v[3]
+            if (numVerts >= 4) {
+                int quadIndices[3] = {0, 2, 3};
+                for (int j = 0; j < 3; j++) {
+                    int i = quadIndices[j];
+                    int posIdx = v[i] - 1;
+                    int texIdx = vt[i] - 1;
+                    int normIdx = vn[i] - 1;
+                    
+                    if (posIdx >= 0 && posIdx * 3 + 2 < (int)tempPositions.size()) {
+                        finalPositions.push_back(tempPositions[posIdx * 3]);
+                        finalPositions.push_back(tempPositions[posIdx * 3 + 1]);
+                        finalPositions.push_back(tempPositions[posIdx * 3 + 2]);
+                    } else {
+                        finalPositions.push_back(0); finalPositions.push_back(0); finalPositions.push_back(0);
+                    }
+                    
+                    if (texIdx >= 0 && texIdx * 2 + 1 < (int)tempTexcoords.size()) {
+                        finalTexcoords.push_back(tempTexcoords[texIdx * 2]);
+                        finalTexcoords.push_back(tempTexcoords[texIdx * 2 + 1]);
+                    } else {
+                        finalTexcoords.push_back(0); finalTexcoords.push_back(0);
+                    }
+                    
+                    if (normIdx >= 0 && normIdx * 3 + 2 < (int)tempNormals.size()) {
+                        finalNormals.push_back(tempNormals[normIdx * 3]);
+                        finalNormals.push_back(tempNormals[normIdx * 3 + 1]);
+                        finalNormals.push_back(tempNormals[normIdx * 3 + 2]);
+                    } else {
+                        finalNormals.push_back(0); finalNormals.push_back(1); finalNormals.push_back(0);
+                    }
+                }
             }
         }
     }
+    
+    fclose(file);
+    
+    // Copy to main mesh
+    mainCharacterMesh.positions = finalPositions;
+    mainCharacterMesh.normals = finalNormals;
+    mainCharacterMesh.texcoords = finalTexcoords;
+    
+    // Create sequential indices (vertices are already expanded)
+    mainCharacterMesh.indices.resize(mainCharacterMesh.positions.size() / 3);
+    for (size_t i = 0; i < mainCharacterMesh.indices.size(); i++) {
+        mainCharacterMesh.indices[i] = static_cast<unsigned int>(i);
+    }
+    
+    // Check if we got any mesh data
+    if (mainCharacterMesh.positions.empty()) {
+        printf("No mesh data was loaded from OBJ file.\n");
+        return false;
+    }
 
+    // Compute bounds
+    mainCharacterMesh.boundsMin = Vector3f(mainCharacterMesh.positions[0], mainCharacterMesh.positions[1], mainCharacterMesh.positions[2]);
+    mainCharacterMesh.boundsMax = mainCharacterMesh.boundsMin;
+    for (size_t i = 0; i < mainCharacterMesh.positions.size(); i += 3) {
+        float x = mainCharacterMesh.positions[i];
+        float y = mainCharacterMesh.positions[i + 1];
+        float z = mainCharacterMesh.positions[i + 2];
+        mainCharacterMesh.boundsMin.x = std::min(mainCharacterMesh.boundsMin.x, x);
+        mainCharacterMesh.boundsMin.y = std::min(mainCharacterMesh.boundsMin.y, y);
+        mainCharacterMesh.boundsMin.z = std::min(mainCharacterMesh.boundsMin.z, z);
+        mainCharacterMesh.boundsMax.x = std::max(mainCharacterMesh.boundsMax.x, x);
+        mainCharacterMesh.boundsMax.y = std::max(mainCharacterMesh.boundsMax.y, y);
+        mainCharacterMesh.boundsMax.z = std::max(mainCharacterMesh.boundsMax.z, z);
+    }
+    
+    float height = std::max(0.001f, mainCharacterMesh.boundsMax.y - mainCharacterMesh.boundsMin.y);
+    mainCharacterMesh.scale = PLAYER_HEIGHT / height;
+    mainCharacterMesh.boundsCenter = Vector3f(
+        (mainCharacterMesh.boundsMin.x + mainCharacterMesh.boundsMax.x) * 0.5f,
+        (mainCharacterMesh.boundsMin.y + mainCharacterMesh.boundsMax.y) * 0.5f,
+        (mainCharacterMesh.boundsMin.z + mainCharacterMesh.boundsMax.z) * 0.5f
+    );
+
+    // Load character texture
+    mainCharacterMesh.albedo = loadTextureFromFile(CHARACTER_TEXTURE_PATH);
     if (!mainCharacterMesh.albedo.valid()) {
+        printf("Warning: Could not load character texture, using fallback.\n");
         mainCharacterMesh.albedo = fallbackTexture;
     }
 
     mainCharacterMesh.loaded = true;
-    printf("Loaded character mesh with %zu vertices and %zu triangles.\n",
+    printf("Loaded OBJ character mesh with %zu vertices and %zu triangles.\n",
            mainCharacterMesh.positions.size() / 3,
            mainCharacterMesh.indices.size() / 3);
+    printf("Model bounds: min(%.2f, %.2f, %.2f) max(%.2f, %.2f, %.2f)\n",
+           mainCharacterMesh.boundsMin.x, mainCharacterMesh.boundsMin.y, mainCharacterMesh.boundsMin.z,
+           mainCharacterMesh.boundsMax.x, mainCharacterMesh.boundsMax.y, mainCharacterMesh.boundsMax.z);
     return true;
+}
+
+// =============================================================================
+// Generic OBJ Loader for Props
+// =============================================================================
+bool loadOBJMesh(const char* modelPath, const char* texturePath, OBJMesh& mesh) {
+    FILE* file = fopen(modelPath, "r");
+    if (!file) {
+        printf("Failed to open OBJ file: %s\n", modelPath);
+        return false;
+    }
+    
+    mesh.positions.clear();
+    mesh.normals.clear();
+    mesh.texcoords.clear();
+    mesh.indices.clear();
+    
+    std::vector<float> tempPositions, tempTexcoords, tempNormals;
+    std::vector<float> finalPositions, finalTexcoords, finalNormals;
+    
+    char line[512];
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        
+        if (line[0] == 'v' && line[1] == ' ') {
+            float x, y, z;
+            if (sscanf(line, "v %f %f %f", &x, &y, &z) == 3) {
+                tempPositions.push_back(x);
+                tempPositions.push_back(y);
+                tempPositions.push_back(z);
+            }
+        }
+        else if (line[0] == 'v' && line[1] == 't') {
+            float u, v;
+            if (sscanf(line, "vt %f %f", &u, &v) == 2) {
+                tempTexcoords.push_back(u);
+                tempTexcoords.push_back(v);
+            }
+        }
+        else if (line[0] == 'v' && line[1] == 'n') {
+            float nx, ny, nz;
+            if (sscanf(line, "vn %f %f %f", &nx, &ny, &nz) == 3) {
+                tempNormals.push_back(nx);
+                tempNormals.push_back(ny);
+                tempNormals.push_back(nz);
+            }
+        }
+        else if (line[0] == 'f' && line[1] == ' ') {
+            int v[4], vt[4], vn[4];
+            int numVerts = 0;
+            for (int i = 0; i < 4; i++) { v[i] = vt[i] = vn[i] = -1; }
+            
+            int matches = sscanf(line, "f %d/%d/%d %d/%d/%d %d/%d/%d %d/%d/%d",
+                &v[0], &vt[0], &vn[0], &v[1], &vt[1], &vn[1], 
+                &v[2], &vt[2], &vn[2], &v[3], &vt[3], &vn[3]);
+            
+            if (matches >= 9) {
+                numVerts = matches / 3;
+            } else {
+                matches = sscanf(line, "f %d//%d %d//%d %d//%d %d//%d",
+                    &v[0], &vn[0], &v[1], &vn[1], &v[2], &vn[2], &v[3], &vn[3]);
+                if (matches >= 6) {
+                    numVerts = matches / 2;
+                } else {
+                    matches = sscanf(line, "f %d/%d %d/%d %d/%d %d/%d",
+                        &v[0], &vt[0], &v[1], &vt[1], &v[2], &vt[2], &v[3], &vt[3]);
+                    if (matches >= 6) {
+                        numVerts = matches / 2;
+                    } else {
+                        matches = sscanf(line, "f %d %d %d %d", &v[0], &v[1], &v[2], &v[3]);
+                        if (matches >= 3) numVerts = matches;
+                    }
+                }
+            }
+            
+            // First triangle
+            if (numVerts >= 3) {
+                for (int i = 0; i < 3; i++) {
+                    int posIdx = v[i] - 1, texIdx = vt[i] - 1, normIdx = vn[i] - 1;
+                    if (posIdx >= 0 && posIdx * 3 + 2 < (int)tempPositions.size()) {
+                        finalPositions.push_back(tempPositions[posIdx * 3]);
+                        finalPositions.push_back(tempPositions[posIdx * 3 + 1]);
+                        finalPositions.push_back(tempPositions[posIdx * 3 + 2]);
+                    } else { finalPositions.push_back(0); finalPositions.push_back(0); finalPositions.push_back(0); }
+                    
+                    if (texIdx >= 0 && texIdx * 2 + 1 < (int)tempTexcoords.size()) {
+                        finalTexcoords.push_back(tempTexcoords[texIdx * 2]);
+                        finalTexcoords.push_back(tempTexcoords[texIdx * 2 + 1]);
+                    } else { finalTexcoords.push_back(0); finalTexcoords.push_back(0); }
+                    
+                    if (normIdx >= 0 && normIdx * 3 + 2 < (int)tempNormals.size()) {
+                        finalNormals.push_back(tempNormals[normIdx * 3]);
+                        finalNormals.push_back(tempNormals[normIdx * 3 + 1]);
+                        finalNormals.push_back(tempNormals[normIdx * 3 + 2]);
+                    } else { finalNormals.push_back(0); finalNormals.push_back(1); finalNormals.push_back(0); }
+                }
+            }
+            
+            // Second triangle for quad
+            if (numVerts >= 4) {
+                int quadIndices[3] = {0, 2, 3};
+                for (int j = 0; j < 3; j++) {
+                    int i = quadIndices[j];
+                    int posIdx = v[i] - 1, texIdx = vt[i] - 1, normIdx = vn[i] - 1;
+                    if (posIdx >= 0 && posIdx * 3 + 2 < (int)tempPositions.size()) {
+                        finalPositions.push_back(tempPositions[posIdx * 3]);
+                        finalPositions.push_back(tempPositions[posIdx * 3 + 1]);
+                        finalPositions.push_back(tempPositions[posIdx * 3 + 2]);
+                    } else { finalPositions.push_back(0); finalPositions.push_back(0); finalPositions.push_back(0); }
+                    
+                    if (texIdx >= 0 && texIdx * 2 + 1 < (int)tempTexcoords.size()) {
+                        finalTexcoords.push_back(tempTexcoords[texIdx * 2]);
+                        finalTexcoords.push_back(tempTexcoords[texIdx * 2 + 1]);
+                    } else { finalTexcoords.push_back(0); finalTexcoords.push_back(0); }
+                    
+                    if (normIdx >= 0 && normIdx * 3 + 2 < (int)tempNormals.size()) {
+                        finalNormals.push_back(tempNormals[normIdx * 3]);
+                        finalNormals.push_back(tempNormals[normIdx * 3 + 1]);
+                        finalNormals.push_back(tempNormals[normIdx * 3 + 2]);
+                    } else { finalNormals.push_back(0); finalNormals.push_back(1); finalNormals.push_back(0); }
+                }
+            }
+        }
+    }
+    fclose(file);
+    
+    mesh.positions = finalPositions;
+    mesh.normals = finalNormals;
+    mesh.texcoords = finalTexcoords;
+    
+    mesh.indices.resize(mesh.positions.size() / 3);
+    for (size_t i = 0; i < mesh.indices.size(); i++) {
+        mesh.indices[i] = static_cast<unsigned int>(i);
+    }
+    
+    if (mesh.positions.empty()) {
+        printf("No mesh data loaded from: %s\n", modelPath);
+        return false;
+    }
+    
+    mesh.computeBounds();
+    
+    // Load texture if provided
+    if (texturePath && strlen(texturePath) > 0) {
+        mesh.albedo = loadTextureFromFile(texturePath);
+    }
+    if (!mesh.albedo.valid()) {
+        mesh.albedo = fallbackTexture;
+    }
+    
+    mesh.loaded = true;
+    printf("Loaded OBJ: %s (%zu verts, %zu tris)\n", modelPath,
+           mesh.positions.size() / 3, mesh.indices.size() / 3);
+    return true;
+}
+
+// Draw an OBJMesh at a given position with scale and rotation
+void drawOBJMesh(const OBJMesh& mesh, Vector3f pos, float rotY = 0.0f, float scale = 1.0f) {
+    if (!mesh.loaded || mesh.positions.empty()) return;
+    
+    glPushMatrix();
+    glTranslatef(pos.x, pos.y, pos.z);
+    glRotatef(rotY, 0, 1, 0);
+    glScalef(scale, scale, scale);
+    
+    // Center the mesh
+    glTranslatef(-mesh.boundsCenter.x, -mesh.boundsMin.y, -mesh.boundsCenter.z);
+    
+    bool hasUV = !mesh.texcoords.empty() && mesh.texcoords.size() / 2 >= mesh.positions.size() / 3;
+    bool hasNormals = !mesh.normals.empty();
+    
+    if (mesh.albedo.valid()) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, mesh.albedo.id);
+        glColor3f(1.0f, 1.0f, 1.0f);
+    } else {
+        glDisable(GL_TEXTURE_2D);
+    }
+    
+    glBegin(GL_TRIANGLES);
+    for (size_t i = 0; i < mesh.indices.size(); i++) {
+        unsigned int idx = mesh.indices[i];
+        if (hasUV && idx * 2 + 1 < mesh.texcoords.size()) {
+            glTexCoord2f(mesh.texcoords[idx * 2], mesh.texcoords[idx * 2 + 1]);
+        }
+        if (hasNormals && idx * 3 + 2 < mesh.normals.size()) {
+            glNormal3f(mesh.normals[idx * 3], mesh.normals[idx * 3 + 1], mesh.normals[idx * 3 + 2]);
+        }
+        if (idx * 3 + 2 < mesh.positions.size()) {
+            glVertex3f(mesh.positions[idx * 3], mesh.positions[idx * 3 + 1], mesh.positions[idx * 3 + 2]);
+        }
+    }
+    glEnd();
+    
+    glDisable(GL_TEXTURE_2D);
+    glPopMatrix();
+}
+
+// Load all prop models
+bool loadPropModels() {
+    printf("Loading prop models...\n");
+    
+    bool success = true;
+    
+    if (!loadOBJMesh(SCARAB_MODEL_PATH, SCARAB_TEXTURE_PATH, scarabMesh)) {
+        printf("Warning: Failed to load scarab model\n");
+        success = false;
+    }
+    
+    if (!loadOBJMesh(CAMERA_MODEL_PATH, CAMERA_TEXTURE_PATH, cameraMesh)) {
+        printf("Warning: Failed to load security camera model\n");
+        success = false;
+    }
+    
+    if (!loadOBJMesh(CONSOLE_MODEL_PATH, CONSOLE_TEXTURE_PATH, consoleMesh)) {
+        printf("Warning: Failed to load console model\n");
+        success = false;
+    }
+    
+    // Load guard texture (model is DAE format, so we just load the texture)
+    guardTexture = loadTextureFromFile(GUARD_TEXTURE_PATH);
+    if (guardTexture.valid()) {
+        guardTextureLoaded = true;
+        printf("Loaded guard texture: %s\n", GUARD_TEXTURE_PATH);
+    } else {
+        printf("Warning: Failed to load guard texture\n");
+    }
+    
+    return success;
 }
 
 void drawLoadedCharacter() {
@@ -1126,37 +1905,86 @@ void drawTemporalCrystal(Vector3f pos, float rotation, float bob) {
 }
 
 void drawGoldenScarab(Vector3f pos, float rotation, float bob) {
-    glPushMatrix();
-    glTranslatef(pos.x, pos.y + bob, pos.z);
-    glRotatef(rotation, 0, 1, 0);
+    if (scarabMesh.loaded) {
+        // Use loaded OBJ model
+        glPushMatrix();
+        glTranslatef(pos.x, pos.y + bob, pos.z);
+        glRotatef(rotation, 0, 1, 0);
+        
+        // Golden emissive glow
+        float emissive[4] = {0.5f, 0.4f, 0.1f, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
+        
+        // Set golden color (will show if texture fails)
+        glColor3f(0.9f, 0.75f, 0.2f);
+        
+        // Calculate scale to make scarab about 0.5 units tall
+        float targetSize = 0.5f;
+        float modelHeight = scarabMesh.boundsMax.y - scarabMesh.boundsMin.y;
+        float scarabScale = targetSize / std::max(0.001f, modelHeight);
+        glScalef(scarabScale, scarabScale, scarabScale);
+        
+        // Center the mesh
+        glTranslatef(-scarabMesh.boundsCenter.x, -scarabMesh.boundsMin.y, -scarabMesh.boundsCenter.z);
+        
+        // Draw the mesh
+        bool hasUV = !scarabMesh.texcoords.empty() && scarabMesh.texcoords.size() / 2 >= scarabMesh.positions.size() / 3;
+        bool hasNormals = !scarabMesh.normals.empty();
+        
+        if (scarabMesh.albedo.valid()) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, scarabMesh.albedo.id);
+        }
+        
+        glBegin(GL_TRIANGLES);
+        for (size_t i = 0; i < scarabMesh.indices.size(); i++) {
+            unsigned int idx = scarabMesh.indices[i];
+            if (hasUV && idx * 2 + 1 < scarabMesh.texcoords.size()) {
+                glTexCoord2f(scarabMesh.texcoords[idx * 2], scarabMesh.texcoords[idx * 2 + 1]);
+            }
+            if (hasNormals && idx * 3 + 2 < scarabMesh.normals.size()) {
+                glNormal3f(scarabMesh.normals[idx * 3], scarabMesh.normals[idx * 3 + 1], scarabMesh.normals[idx * 3 + 2]);
+            }
+            if (idx * 3 + 2 < scarabMesh.positions.size()) {
+                glVertex3f(scarabMesh.positions[idx * 3], scarabMesh.positions[idx * 3 + 1], scarabMesh.positions[idx * 3 + 2]);
+            }
+        }
+        glEnd();
+        
+        glDisable(GL_TEXTURE_2D);
+        float noEmissive[4] = {0, 0, 0, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
+        glPopMatrix();
+    } else {
+        // Fallback: Original placeholder
+        glPushMatrix();
+        glTranslatef(pos.x, pos.y + bob, pos.z);
+        glRotatef(rotation, 0, 1, 0);
 
-    // Emissive material for scarab
-    float emissive[4] = {0.8f, 0.6f, 0.2f, 1.0f};
-    glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
-    glColor3f(0.9f, 0.7f, 0.1f);
+        float emissive[4] = {0.8f, 0.6f, 0.2f, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
+        glColor3f(0.9f, 0.7f, 0.1f);
 
-    // Scarab body (oval)
-    glScalef(0.4f, 0.2f, 0.6f);
-    drawSphere(1.0f, 16, 16);
+        glScalef(0.4f, 0.2f, 0.6f);
+        drawSphere(1.0f, 16, 16);
 
-    // Scarab head
-    glPushMatrix();
-    glTranslatef(0, 0, 0.7f);
-    glScalef(0.3f, 0.3f, 0.3f);
-    drawSphere(1.0f, 12, 12);
-    glPopMatrix();
+        glPushMatrix();
+        glTranslatef(0, 0, 0.7f);
+        glScalef(0.3f, 0.3f, 0.3f);
+        drawSphere(1.0f, 12, 12);
+        glPopMatrix();
 
-    // Scarab wings (carved inlay style)
-    glPushMatrix();
-    glTranslatef(0, 0.15f, 0);
-    glScalef(0.8f, 0.1f, 1.2f);
-    glColor3f(0.95f, 0.75f, 0.15f);
-    drawSphere(1.0f, 16, 16);
-    glPopMatrix();
+        glPushMatrix();
+        glTranslatef(0, 0.15f, 0);
+        glScalef(0.8f, 0.1f, 1.2f);
+        glColor3f(0.95f, 0.75f, 0.15f);
+        drawSphere(1.0f, 16, 16);
+        glPopMatrix();
 
-    float noEmissive[4] = {0, 0, 0, 1.0f};
-    glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
-    glPopMatrix();
+        float noEmissive[4] = {0, 0, 0, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
+        glPopMatrix();
+    }
 }
 
 void drawPlayer() {
@@ -1166,27 +1994,28 @@ void drawPlayer() {
     }
     
     glPushMatrix();
-    // Translate to player position
-    glTranslatef(player.position.x, player.position.y, player.position.z);
+    // Translate to player position (player.position.y is at player's center)
+    // Move down by half player height to place at feet level
+    glTranslatef(player.position.x, player.position.y - PLAYER_HEIGHT * 0.5f, player.position.z);
     
     // Rotate player to face the direction they're moving (yaw angle)
     // player.yaw is smoothly updated in Player::update() to face movement direction
     glRotatef(player.yaw + 180.0f, 0, 1, 0);  // Rotate around Y-axis (+180 to face forward)
 
     if (mainCharacterMesh.loaded) {
-        // For GLTF model: Apply proper transformations
+        // For OBJ model: Apply proper transformations
         
-        // Scale the model to fit player height
-        float modelScale = mainCharacterMesh.scale * 1.0f;
+        // Scale the model to fit player height (increased scale)
+        float modelScale = mainCharacterMesh.scale * 1.5f;  // Larger scale
         glScalef(modelScale, modelScale, modelScale);
         
-        // Rotate model to face forward (+Z direction in our game)
-        // Most GLTF models are exported facing -Z or +X, so we rotate 180 degrees
+        // OBJ models are typically Y-up, which matches our coordinate system
+        // Just rotate 180 degrees if the model faces the wrong direction
         glRotatef(180.0f, 0, 1, 0);
         
-        // Center the model horizontally and place feet at origin
+        // Center the model horizontally and place feet at ground level
         glTranslatef(-mainCharacterMesh.boundsCenter.x,
-                     -mainCharacterMesh.boundsMin.y,  // Place feet at ground level
+                     -mainCharacterMesh.boundsMin.y,   // Place feet at origin (ground level)
                      -mainCharacterMesh.boundsCenter.z);
         
         // Draw the character model
@@ -1308,61 +2137,301 @@ void drawLaserGrid(Vector3f pos, float size, bool active) {
 }
 
 void drawSecurityCamera(Vector3f pos, float rotation, float sweepAngle) {
-    glPushMatrix();
-    glTranslatef(pos.x, pos.y, pos.z);
-    glRotatef(rotation, 0, 1, 0);
+    if (cameraMesh.loaded) {
+        // Use loaded OBJ model
+        // Calculate scale to make camera about 0.8 units tall
+        float targetSize = 0.8f;
+        float modelHeight = cameraMesh.boundsMax.y - cameraMesh.boundsMin.y;
+        float cameraScale = targetSize / std::max(0.001f, modelHeight);
+        
+        drawOBJMesh(cameraMesh, pos, rotation, cameraScale);
+        
+        // Draw detection cone (points forward in direction camera faces)
+        if (alarmActive) {
+            glPushMatrix();
+            glTranslatef(pos.x, pos.y, pos.z);
+            glRotatef(rotation, 0, 1, 0);
+            glColor4f(1.0f, 0.0f, 0.0f, 0.2f);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            
+            // Detection cone pointing in +X direction (forward for this security camera model)
+            glBegin(GL_TRIANGLES);
+            glVertex3f(0, 0, 0);
+            float angle1 = -sweepAngle * 0.5f;
+            float angle2 = sweepAngle * 0.5f;
+            float dist = 8.0f;
+            // Cone points in +X direction (matches camera lens direction)
+            glVertex3f(cos(DEG2RAD(angle1)) * dist, -2.0f, sin(DEG2RAD(angle1)) * dist);
+            glVertex3f(cos(DEG2RAD(angle2)) * dist, -2.0f, sin(DEG2RAD(angle2)) * dist);
+            glEnd();
+            
+            glDisable(GL_BLEND);
+            glPopMatrix();
+        }
+    } else {
+        // Fallback: Original placeholder
+        glPushMatrix();
+        glTranslatef(pos.x, pos.y, pos.z);
+        glRotatef(rotation, 0, 1, 0);
 
-    glColor3f(0.3f, 0.3f, 0.3f);
-    
-    // Camera body
-    glPushMatrix();
-    glTranslatef(0, 0, 0);
-    drawCube(0.4f);
-    glPopMatrix();
+        glColor3f(0.3f, 0.3f, 0.3f);
+        
+        glPushMatrix();
+        glTranslatef(0, 0, 0);
+        drawCube(0.4f);
+        glPopMatrix();
 
-    // Camera lens
-    glPushMatrix();
-    glTranslatef(0, 0, 0.25f);
-    glColor3f(0.1f, 0.1f, 0.1f);
-    drawSphere(0.15f, 12, 12);
-    glPopMatrix();
+        glPushMatrix();
+        glTranslatef(0, 0, 0.25f);
+        glColor3f(0.1f, 0.1f, 0.1f);
+        drawSphere(0.15f, 12, 12);
+        glPopMatrix();
 
-    // Detection cone (visual)
-    if (alarmActive) {
-        glColor4f(1.0f, 0.0f, 0.0f, 0.2f);
-        glBegin(GL_TRIANGLES);
-        glVertex3f(0, 0, 0);
-        float angle1 = -sweepAngle * 0.5f;
-        float angle2 = sweepAngle * 0.5f;
-        float dist = 8.0f;
-        glVertex3f(sin(DEG2RAD(angle1)) * dist, -2.0f, cos(DEG2RAD(angle1)) * dist);
-        glVertex3f(sin(DEG2RAD(angle2)) * dist, -2.0f, cos(DEG2RAD(angle2)) * dist);
-        glEnd();
+        if (alarmActive) {
+            glColor4f(1.0f, 0.0f, 0.0f, 0.2f);
+            glBegin(GL_TRIANGLES);
+            glVertex3f(0, 0, 0);
+            float angle1 = -sweepAngle * 0.5f;
+            float angle2 = sweepAngle * 0.5f;
+            float dist = 8.0f;
+            glVertex3f(sin(DEG2RAD(angle1)) * dist, -2.0f, cos(DEG2RAD(angle1)) * dist);
+            glVertex3f(sin(DEG2RAD(angle2)) * dist, -2.0f, cos(DEG2RAD(angle2)) * dist);
+            glEnd();
+        }
+
+        glPopMatrix();
     }
-
-    glPopMatrix();
 }
 
 void drawControlConsole(Vector3f pos, bool activated) {
-    glPushMatrix();
-    glTranslatef(pos.x, pos.y, pos.z);
-
-    glColor3f(0.1f, 0.3f, 0.5f);
-    
-    // Console base
-    drawCube(1.5f);
-    
-    // Console screen
-    glPushMatrix();
-    glTranslatef(0, 0.8f, 0.76f);
-    if (activated) {
-        glColor3f(0.0f, 1.0f, 0.0f);
+    if (consoleMesh.loaded) {
+        // Use loaded OBJ model
+        // Calculate scale to make console about 1.5 units tall
+        float targetSize = 1.5f;
+        float modelHeight = consoleMesh.boundsMax.y - consoleMesh.boundsMin.y;
+        float consoleScale = targetSize / std::max(0.001f, modelHeight);
+        
+        // Add glow if activated
+        if (activated) {
+            float emissive[4] = {0.0f, 0.3f, 0.1f, 1.0f};
+            glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
+        }
+        
+        drawOBJMesh(consoleMesh, pos, 0.0f, consoleScale);
+        
+        if (activated) {
+            float noEmissive[4] = {0, 0, 0, 1.0f};
+            glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
+        }
     } else {
-        glColor3f(0.2f, 0.2f, 0.4f);
-    }
-    drawCube(1.0f);
-    glPopMatrix();
+        // Fallback: Original placeholder
+        glPushMatrix();
+        glTranslatef(pos.x, pos.y, pos.z);
 
+        glColor3f(0.1f, 0.3f, 0.5f);
+        
+        drawCube(1.5f);
+        
+        glPushMatrix();
+        glTranslatef(0, 0.8f, 0.76f);
+        if (activated) {
+            glColor3f(0.0f, 1.0f, 0.0f);
+        } else {
+            glColor3f(0.2f, 0.2f, 0.4f);
+        }
+        drawCube(1.0f);
+        glPopMatrix();
+
+        glPopMatrix();
+    }
+}
+
+// Draw Security Robot - Futuristic robot guard for Neo Tokyo
+void drawSecurityRobot(const SecurityRobot& robot) {
+    if (!robot.active && !alarmActive) return;  // Don't draw if inactive
+    
+    glPushMatrix();
+    glTranslatef(robot.position.x, robot.position.y, robot.position.z);
+    glRotatef(robot.yaw, 0, 1, 0);
+    
+    // Use guard texture if loaded
+    bool useTexture = guardTextureLoaded && guardTexture.valid();
+    if (useTexture) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, guardTexture.id);
+        glColor3f(1.0f, 1.0f, 1.0f);
+    }
+    
+    // Robot body - metallic/armored appearance
+    float specular[4] = {0.8f, 0.8f, 0.9f, 1.0f};
+    glMaterialfv(GL_FRONT, GL_SPECULAR, specular);
+    glMaterialf(GL_FRONT, GL_SHININESS, 80.0f);
+    
+    // Helper lambda for textured cube
+    auto drawTexturedCube = [&](float size) {
+        float hs = size * 0.5f;
+        glBegin(GL_QUADS);
+        // Front
+        glNormal3f(0, 0, 1);
+        glTexCoord2f(0.0f, 0.0f); glVertex3f(-hs, -hs, hs);
+        glTexCoord2f(0.3f, 0.0f); glVertex3f(hs, -hs, hs);
+        glTexCoord2f(0.3f, 0.5f); glVertex3f(hs, hs, hs);
+        glTexCoord2f(0.0f, 0.5f); glVertex3f(-hs, hs, hs);
+        // Back
+        glNormal3f(0, 0, -1);
+        glTexCoord2f(0.3f, 0.0f); glVertex3f(-hs, -hs, -hs);
+        glTexCoord2f(0.3f, 0.5f); glVertex3f(-hs, hs, -hs);
+        glTexCoord2f(0.6f, 0.5f); glVertex3f(hs, hs, -hs);
+        glTexCoord2f(0.6f, 0.0f); glVertex3f(hs, -hs, -hs);
+        // Top
+        glNormal3f(0, 1, 0);
+        glTexCoord2f(0.0f, 0.5f); glVertex3f(-hs, hs, -hs);
+        glTexCoord2f(0.0f, 1.0f); glVertex3f(-hs, hs, hs);
+        glTexCoord2f(0.3f, 1.0f); glVertex3f(hs, hs, hs);
+        glTexCoord2f(0.3f, 0.5f); glVertex3f(hs, hs, -hs);
+        // Bottom
+        glNormal3f(0, -1, 0);
+        glTexCoord2f(0.3f, 0.5f); glVertex3f(-hs, -hs, -hs);
+        glTexCoord2f(0.6f, 0.5f); glVertex3f(hs, -hs, -hs);
+        glTexCoord2f(0.6f, 1.0f); glVertex3f(hs, -hs, hs);
+        glTexCoord2f(0.3f, 1.0f); glVertex3f(-hs, -hs, hs);
+        // Right
+        glNormal3f(1, 0, 0);
+        glTexCoord2f(0.6f, 0.0f); glVertex3f(hs, -hs, -hs);
+        glTexCoord2f(0.6f, 0.5f); glVertex3f(hs, hs, -hs);
+        glTexCoord2f(1.0f, 0.5f); glVertex3f(hs, hs, hs);
+        glTexCoord2f(1.0f, 0.0f); glVertex3f(hs, -hs, hs);
+        // Left
+        glNormal3f(-1, 0, 0);
+        glTexCoord2f(0.0f, 0.0f); glVertex3f(-hs, -hs, -hs);
+        glTexCoord2f(0.3f, 0.0f); glVertex3f(-hs, -hs, hs);
+        glTexCoord2f(0.3f, 0.5f); glVertex3f(-hs, hs, hs);
+        glTexCoord2f(0.0f, 0.5f); glVertex3f(-hs, hs, -hs);
+        glEnd();
+    };
+    
+    if (!useTexture) {
+        glColor3f(0.25f, 0.25f, 0.3f);
+    }
+    
+    // Main body (torso)
+    glPushMatrix();
+    glScalef(0.8f, 1.2f, 0.5f);
+    drawTexturedCube(1.0f);
+    glPopMatrix();
+    
+    // Head
+    glPushMatrix();
+    glTranslatef(0, 0.9f, 0);
+    if (!useTexture) glColor3f(0.3f, 0.3f, 0.35f);
+    drawSphere(0.35f, 16, 16);
+    
+    // Visor (eye strip) - glowing red when active
+    glDisable(GL_TEXTURE_2D);
+    glPushMatrix();
+    glTranslatef(0, 0.05f, 0.25f);
+    if (alarmActive) {
+        float emissive[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
+        glColor3f(1.0f, 0.0f, 0.0f);
+    } else {
+        glColor3f(0.2f, 0.2f, 0.3f);
+    }
+    glScalef(0.5f, 0.15f, 0.1f);
+    drawCube(1.0f);
+    float noEmissive[4] = {0, 0, 0, 1.0f};
+    glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
+    glPopMatrix();
+    glPopMatrix();
+    
+    // Re-enable texture for body parts
+    if (useTexture) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, guardTexture.id);
+        glColor3f(1.0f, 1.0f, 1.0f);
+    }
+    
+    // Shoulders
+    if (!useTexture) glColor3f(0.2f, 0.2f, 0.25f);
+    glPushMatrix();
+    glTranslatef(-0.6f, 0.4f, 0);
+    drawSphere(0.2f, 12, 12);
+    glPopMatrix();
+    glPushMatrix();
+    glTranslatef(0.6f, 0.4f, 0);
+    drawSphere(0.2f, 12, 12);
+    glPopMatrix();
+    
+    // Arms
+    if (!useTexture) glColor3f(0.22f, 0.22f, 0.27f);
+    // Left arm
+    glPushMatrix();
+    glTranslatef(-0.7f, 0.0f, 0);
+    glScalef(0.15f, 0.6f, 0.15f);
+    drawTexturedCube(1.0f);
+    glPopMatrix();
+    // Right arm
+    glPushMatrix();
+    glTranslatef(0.7f, 0.0f, 0);
+    glScalef(0.15f, 0.6f, 0.15f);
+    drawTexturedCube(1.0f);
+    glPopMatrix();
+    
+    // Legs
+    if (!useTexture) glColor3f(0.2f, 0.2f, 0.25f);
+    // Left leg
+    glPushMatrix();
+    glTranslatef(-0.25f, -0.9f, 0);
+    glScalef(0.2f, 0.6f, 0.2f);
+    drawTexturedCube(1.0f);
+    glPopMatrix();
+    // Right leg
+    glPushMatrix();
+    glTranslatef(0.25f, -0.9f, 0);
+    glScalef(0.2f, 0.6f, 0.2f);
+    drawTexturedCube(1.0f);
+    glPopMatrix();
+    
+    // Feet
+    if (!useTexture) glColor3f(0.15f, 0.15f, 0.2f);
+    glPushMatrix();
+    glTranslatef(-0.25f, -1.3f, 0.1f);
+    glScalef(0.25f, 0.1f, 0.35f);
+    drawTexturedCube(1.0f);
+    glPopMatrix();
+    glPushMatrix();
+    glTranslatef(0.25f, -1.3f, 0.1f);
+    glScalef(0.25f, 0.1f, 0.35f);
+    drawTexturedCube(1.0f);
+    glPopMatrix();
+    
+    glDisable(GL_TEXTURE_2D);
+    
+    // Warning lights on shoulders (blinking when alarm active)
+    if (alarmActive) {
+        float blink = (sin(gameTime * 10.0f) > 0) ? 1.0f : 0.3f;
+        float warningEmissive[4] = {1.0f * blink, 0.3f * blink, 0.0f, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, warningEmissive);
+        glColor3f(1.0f * blink, 0.3f * blink, 0.0f);
+        
+        glPushMatrix();
+        glTranslatef(-0.6f, 0.55f, 0);
+        drawSphere(0.08f, 8, 8);
+        glPopMatrix();
+        glPushMatrix();
+        glTranslatef(0.6f, 0.55f, 0);
+        drawSphere(0.08f, 8, 8);
+        glPopMatrix();
+        
+        glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
+    }
+    
+    // Reset material
+    float defaultSpec[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+    glMaterialfv(GL_FRONT, GL_SPECULAR, defaultSpec);
+    glMaterialf(GL_FRONT, GL_SHININESS, 32.0f);
+    
     glPopMatrix();
 }
 
@@ -1638,6 +2707,9 @@ void drawNeoTokyoEnvironment() {
     // Control Console
     drawControlConsole(Vector3f(-20, 1, -20), consoleActivated);
 
+    // Security Robot
+    drawSecurityRobot(securityRobot);
+
     // Exit Portal
     float portalPulse = sin(gameTime * 3.0f) * 0.5f + 0.5f;
     drawExitPortal(Vector3f(20, 2, 20), portalUnlocked, portalPulse);
@@ -1773,9 +2845,7 @@ void drawTempleEnvironment() {
         drawPressurePlate(Vector3f(x, 0.5f, -10), plateTriggered[i]);
     }
 
-    // Moving Platforms
-    float platformOffset = sin(gameTime * 2.0f) * 2.0f;
-    drawMovingPlatform(Vector3f(0, 3, 0), platformOffset);
+    // Moving Platform removed from center
 
     // Guardian Statue
     float guardRotation = fmod(gameTime * 20.0f, 360.0f);
@@ -2014,8 +3084,8 @@ void initializeNeoTokyo() {
     crystals.push_back(Collectible(Vector3f(0, 1.5f, -20), 0));
     crystals.push_back(Collectible(Vector3f(0, 1.5f, 20), 0));
     
-    // Reset player position and orientation
-    player.position = Vector3f(0, 2, 0);
+    // Reset player position and orientation (spawn at ground level)
+    player.position = Vector3f(0, GROUND_Y + PLAYER_HEIGHT * 0.5f, 0);
     player.velocity = Vector3f(0, 0, 0);
     player.yaw = 0.0f;
     player.targetYaw = 0.0f;
@@ -2028,6 +3098,13 @@ void initializeNeoTokyo() {
     alarmActive = false;
     hitReactionActive = false;
     lighting.currentScene = 0;
+    
+    // Reset security robot
+    securityRobot.position = Vector3f(15.0f, GROUND_Y + 1.0f, 15.0f);
+    securityRobot.velocity = Vector3f(0, 0, 0);
+    securityRobot.yaw = 0.0f;
+    securityRobot.damageTimer = 0.0f;
+    securityRobot.active = false;
     
     // Reset camera (keep current mode, reset angles)
     camera.cameraYaw = 0.0f;
@@ -2046,8 +3123,8 @@ void initializeTemple() {
     scarabs.push_back(Collectible(Vector3f(0, 1.5f, -25), 1));
     scarabs.push_back(Collectible(Vector3f(0, 1.5f, 25), 1));
     
-    // Reset player position and orientation
-    player.position = Vector3f(0, 2, 0);
+    // Reset player position and orientation (spawn at ground level)
+    player.position = Vector3f(0, GROUND_Y + PLAYER_HEIGHT * 0.5f, 0);
     player.velocity = Vector3f(0, 0, 0);
     player.yaw = 0.0f;
     player.targetYaw = 0.0f;
@@ -2157,9 +3234,21 @@ void checkObstacles() {
             alarmActive = false;
         }
 
-        // Control Console interaction
+        // Security Robot update and collision
+        securityRobot.update(player.position, alarmActive, 0.016f);  // ~60fps deltaTime
+        if (securityRobot.active && securityRobot.checkCollisionWithPlayer(player.position)) {
+            if (securityRobot.damageTimer <= 0) {
+                player.health -= 3;  // Low damage
+                hitReactionActive = true;
+                hitReactionTime = gameTime;
+                securityRobot.damageTimer = 1.0f;  // 1 second cooldown between hits
+                playSFX("robot_hit");
+            }
+        }
+
+        // Control Console interaction (larger activation radius to match wider console model)
         Vector3f consolePos(-20, 1, -20);
-        if ((player.position - consolePos).lengthSquared() < 4.0f) {
+        if ((player.position - consolePos).lengthSquared() < 16.0f) {  // radius ~4 units
             if (keys['E'] || keys['e']) {
                 if (!consoleActivated) {
                     consoleActivated = true;
@@ -2274,7 +3363,7 @@ void updateGame(float deltaTime) {
             // First-person: Movement is relative to player's look direction
             float radYaw = DEG2RAD(player.yaw);
             Vector3f forward = Vector3f(sin(radYaw), 0, cos(radYaw));
-            Vector3f right = Vector3f(cos(radYaw), 0, -sin(radYaw));
+            Vector3f right = Vector3f(-cos(radYaw), 0, sin(radYaw));  // Fixed: proper right vector
             
             // In first-person, don't auto-rotate player - they face where they look
             // Just apply velocity directly
@@ -2302,8 +3391,8 @@ void updateGame(float deltaTime) {
     };
     std::vector<AABB> staticColliders;
     if (gameState == STATE_NEO_TOKYO) {
-        // Control console
-        staticColliders.push_back(makeBox(Vector3f(-20.0f, 1.0f, -20.0f), Vector3f(1.0f, 1.0f, 1.0f)));
+        // Control console (wider OBJ model - approximately 2x1.5x2 units)
+        staticColliders.push_back(makeBox(Vector3f(-20.0f, 0.75f, -20.0f), Vector3f(1.5f, 0.75f, 1.5f)));
         // Exit portal
         staticColliders.push_back(makeBox(Vector3f(20.0f, 2.0f, 20.0f), Vector3f(2.0f, 3.0f, 2.0f)));
         // Laser grid
@@ -2320,10 +3409,6 @@ void updateGame(float deltaTime) {
         staticColliders.push_back(makeBox(Vector3f(20.0f, 3.0f, 20.0f), Vector3f(2.5f, 3.0f, 2.5f)));
         // Guardian statue
         staticColliders.push_back(makeBox(Vector3f(15.0f, 2.0f, 15.0f), Vector3f(1.0f, 2.0f, 1.0f)));
-        // Moving platform (dynamic)
-        float platformOffset = sin(gameTime * 2.0f) * 2.0f;
-        Vector3f platformCenter = Vector3f(0.0f, 3.0f + platformOffset, 0.0f);
-        staticColliders.push_back(makeBox(platformCenter, Vector3f(1.0f, 0.6f, 1.0f)));
         // Exit portal (relocated to avoid pyramid overlap)
         staticColliders.push_back(makeBox(Vector3f(-12.0f, 2.0f, -20.0f), Vector3f(2.0f, 3.0f, 2.0f)));
     }
@@ -2331,7 +3416,7 @@ void updateGame(float deltaTime) {
     for (const auto& box : staticColliders) {
         resolvePlayerAABBCollision(player, box);
     }
-
+ 
     // Update camera
     camera.update(player);
 
@@ -2474,11 +3559,11 @@ void mouseMotion(int x, int y) {
         float sensitivity = 0.2f;  // Sensitivity for first-person look
         
         // Update player's horizontal look direction (yaw)
-        // Move mouse right = look right (increase yaw)
+        // Move mouse right = look right (normal)
         player.yaw += dx * sensitivity;
         
         // Update player's vertical look direction (pitch)
-        // Move mouse down = look down (standard FPS controls)
+        // Move mouse down = look down (normal)
         player.pitch -= dy * sensitivity;
         
         // Wrap yaw to 0-360 range
@@ -2498,12 +3583,12 @@ void mouseMotion(int x, int y) {
         float sensitivity = 0.3f;  // Camera orbit sensitivity
         
         // Update camera yaw (horizontal orbit around player)
-        // Move mouse right = camera orbits right (clockwise when viewed from above)
-        camera.cameraYaw += dx * sensitivity;
+        // Move mouse right = camera orbits left (inverted)
+        camera.cameraYaw -= dx * sensitivity;
         
         // Update camera pitch (vertical angle)
-        // Move mouse up = camera looks more downward (higher pitch)
-        camera.cameraPitch += dy * sensitivity * 0.5f;
+        // Move mouse up = camera looks more upward (inverted)
+        camera.cameraPitch -= dy * sensitivity * 0.5f;
         
         // Wrap camera yaw to 0-360 range
         while (camera.cameraYaw > 360.0f) camera.cameraYaw -= 360.0f;
@@ -2562,6 +3647,9 @@ int main(int argc, char** argv) {
     if (!loadMainCharacterModel()) {
         printf("Using fallback capsule player.\n");
     }
+    
+    // Load prop models (scarab, camera, console)
+    loadPropModels();
     
     // Initialize input
     memset(keys, false, sizeof(keys));
