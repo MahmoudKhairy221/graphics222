@@ -335,6 +335,50 @@ public:
     }
 };
 
+// Simple AABB used for blocking collisions
+struct AABB {
+    Vector3f min;
+    Vector3f max;
+};
+
+static float clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+// Resolve collision between player (cylindrical approximation) and an AABB in XZ plane with height
+bool resolvePlayerAABBCollision(Player& player, const AABB& box) {
+    float playerMinY = player.position.y - PLAYER_HEIGHT * 0.5f;
+    float playerMaxY = player.position.y + PLAYER_HEIGHT * 0.5f;
+    
+    // Vertical overlap check
+    if (playerMaxY < box.min.y || playerMinY > box.max.y) {
+        return false;
+    }
+    
+    float nearestX = clampf(player.position.x, box.min.x, box.max.x);
+    float nearestZ = clampf(player.position.z, box.min.z, box.max.z);
+    
+    float dx = player.position.x - nearestX;
+    float dz = player.position.z - nearestZ;
+    float distSq = dx * dx + dz * dz;
+    
+    if (distSq >= PLAYER_RADIUS * PLAYER_RADIUS) {
+        return false;
+    }
+    
+    float overlapX = PLAYER_RADIUS - fabsf(dx);
+    float overlapZ = PLAYER_RADIUS - fabsf(dz);
+    
+    if (overlapX < overlapZ) {
+        player.position.x += (dx >= 0 ? overlapX : -overlapX);
+    } else {
+        player.position.z += (dz >= 0 ? overlapZ : -overlapZ);
+    }
+    return true;
+}
+
 // =============================================================================
 // Camera Class - Third-Person Camera System
 // =============================================================================
@@ -1445,9 +1489,11 @@ void drawGuardianStatue(Vector3f pos, float rotation) {
 }
 
 void drawNeoTokyoEnvironment() {
-    // Floor + walls texture
+    // Floor + walls texture with camera-occlusion fade on walls
     float floorRepeat = 8.0f;
     useTexture(neoTokyoSurface);
+
+    // Floor (no fade needed)
     glBegin(GL_QUADS);
     glNormal3f(0, 1, 0);
     glTexCoord2f(0, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MIN);
@@ -1456,7 +1502,23 @@ void drawNeoTokyoEnvironment() {
     glTexCoord2f(0, floorRepeat); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
     glEnd();
 
+    // Wall fade based on camera proximity/intersection
     float wallRepeat = 6.0f;
+    float fade = 1.0f;
+    if (camera.mode == CAMERA_THIRD_PERSON) {
+        const float fadeDist = 1.5f;
+        if (camera.eye.z < WORLD_MIN + fadeDist) fade = 0.35f;
+        if (camera.eye.z > WORLD_MAX - fadeDist) fade = std::min(fade, 0.35f);
+        if (camera.eye.x > WORLD_MAX - fadeDist) fade = std::min(fade, 0.35f);
+        if (camera.eye.x < WORLD_MIN + fadeDist) fade = std::min(fade, 0.35f);
+    }
+    bool useFade = fade < 0.99f;
+    if (useFade) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(1.0f, 1.0f, 1.0f, fade);
+    }
+
     // North wall
     glBegin(GL_QUADS);
     glNormal3f(0, 0, -1);
@@ -1490,19 +1552,48 @@ void drawNeoTokyoEnvironment() {
     glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
     glEnd();
 
+    if (useFade) {
+        glDisable(GL_BLEND);
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+
     glBindTexture(GL_TEXTURE_2D, 0);
     glDisable(GL_TEXTURE_2D);
 
-    // Decorative wall panels
-    for (int i = 0; i < 8; i++) {
-        float x = WORLD_MIN + (i % 4) * 15.0f;
-        float z = (i < 4) ? WORLD_MIN + 1.0f : WORLD_MAX - 1.0f;
+    // Decorative panels/screens (custom meshes)
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, neoTokyoSurface.id);
+    glColor3f(0.8f, 0.9f, 1.0f);
+    auto drawPanel = [](float w, float h) {
+        float hw = w * 0.5f;
+        float hh = h * 0.5f;
+        glBegin(GL_QUADS);
+        glNormal3f(0, 0, 1);
+        glTexCoord2f(0, 0); glVertex3f(-hw, -hh, 0);
+        glTexCoord2f(1, 0); glVertex3f(hw, -hh, 0);
+        glTexCoord2f(1, 1); glVertex3f(hw, hh, 0);
+        glTexCoord2f(0, 1); glVertex3f(-hw, hh, 0);
+        glEnd();
+    };
+    // Place panels on walls
+    struct Panel { float x, y, z, yaw, w, h; };
+    Panel panels[] = {
+        { -10.0f, 4.0f, WORLD_MIN + 0.1f,   0.0f, 6.0f, 3.0f },
+        {  10.0f, 4.0f, WORLD_MIN + 0.1f,   0.0f, 5.0f, 2.5f },
+        { WORLD_MIN + 0.1f, 3.5f, -10.0f,  90.0f, 4.5f, 2.0f },
+        { WORLD_MIN + 0.1f, 5.0f,  10.0f,  90.0f, 5.5f, 2.5f },
+        {  15.0f, 3.0f, WORLD_MAX - 0.1f, 180.0f, 6.5f, 3.0f },
+        { -15.0f, 5.0f, WORLD_MAX - 0.1f, 180.0f, 5.0f, 2.5f }
+    };
+    for (auto& p : panels) {
         glPushMatrix();
-        glTranslatef(x, 3.0f, z);
-        glColor3f(0.25f, 0.3f, 0.35f);
-        drawCube(2.0f);
+        glTranslatef(p.x, p.y, p.z);
+        glRotatef(p.yaw, 0, 1, 0);
+        drawPanel(p.w, p.h);
         glPopMatrix();
     }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
 
         // Draw collectibles
         for (size_t i = 0; i < crystals.size(); i++) {
@@ -1563,8 +1654,22 @@ void drawTempleEnvironment() {
     glTexCoord2f(0, floorRepeat); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
     glEnd();
 
-    // Walls with hieroglyphic texture pattern
+    // Walls with hieroglyphic texture pattern (with camera fade)
     float wallRepeat = 4.0f;
+    float fade = 1.0f;
+    if (camera.mode == CAMERA_THIRD_PERSON) {
+        const float fadeDist = 1.5f;
+        if (camera.eye.z < WORLD_MIN + fadeDist) fade = 0.35f;
+        if (camera.eye.z > WORLD_MAX - fadeDist) fade = std::min(fade, 0.35f);
+        if (camera.eye.x > WORLD_MAX - fadeDist) fade = std::min(fade, 0.35f);
+        if (camera.eye.x < WORLD_MIN + fadeDist) fade = std::min(fade, 0.35f);
+    }
+    bool useFade = fade < 0.99f;
+    if (useFade) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(1.0f, 1.0f, 1.0f, fade);
+    }
     // North wall
     glBegin(GL_QUADS);
     glNormal3f(0, 0, -1);
@@ -1597,6 +1702,10 @@ void drawTempleEnvironment() {
     glTexCoord2f(wallRepeat, CEILING_Y * 0.15f); glVertex3f(WORLD_MIN, CEILING_Y, WORLD_MAX);
     glTexCoord2f(wallRepeat, 0); glVertex3f(WORLD_MIN, GROUND_Y, WORLD_MAX);
     glEnd();
+    if (useFade) {
+        glDisable(GL_BLEND);
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    }
 
     glBindTexture(GL_TEXTURE_2D, 0);
     glDisable(GL_TEXTURE_2D);
@@ -1672,10 +1781,10 @@ void drawTempleEnvironment() {
     float guardRotation = fmod(gameTime * 20.0f, 360.0f);
     drawGuardianStatue(Vector3f(15, 1, 15), guardRotation);
 
-    // Exit Portal
+    // Exit Portal (moved inward to avoid corner pyramid)
     bool portalReady = player.scarabsCollected >= SCARABS_REQUIRED;
     float portalPulse = sin(gameTime * 3.0f) * 0.5f + 0.5f;
-    drawExitPortal(Vector3f(-20, 2, -20), portalReady, portalPulse);
+    drawExitPortal(Vector3f(-12, 2, -20), portalReady, portalPulse);
 }
 
 void drawHUD() {
@@ -2104,8 +2213,8 @@ void checkObstacles() {
             playSFX("guardian_hit");
         }
 
-        // Exit Portal
-        Vector3f portalPos(-20, 2, -20);
+        // Exit Portal (relocated to avoid pyramid overlap)
+        Vector3f portalPos(-12, 2, -20);
         if (player.scarabsCollected >= SCARABS_REQUIRED) {
             if ((player.position - portalPos).lengthSquared() < 9.0f) {
                 gameState = STATE_WIN;
@@ -2135,11 +2244,7 @@ void updateGame(float deltaTime) {
     }
 
     // Auto-switch to temple after 30 seconds (dummy test)
-    if (gameState == STATE_NEO_TOKYO && gameTime >= 30.0f) {
-        gameState = STATE_TEMPLE;
-        initializeTemple();
-        return;
-    }
+    // Removed auto-transition; player advances only via portal/level completion
 
     // Update lighting
     lighting.update(deltaTime);
@@ -2187,6 +2292,45 @@ void updateGame(float deltaTime) {
     }
 
     player.update();
+
+    // -------------------------------------------------
+    // Static collision blocking (world geometry)
+    // -------------------------------------------------
+    auto makeBox = [](const Vector3f& center, const Vector3f& half) {
+        return AABB{Vector3f(center.x - half.x, center.y - half.y, center.z - half.z),
+                    Vector3f(center.x + half.x, center.y + half.y, center.z + half.z)};
+    };
+    std::vector<AABB> staticColliders;
+    if (gameState == STATE_NEO_TOKYO) {
+        // Control console
+        staticColliders.push_back(makeBox(Vector3f(-20.0f, 1.0f, -20.0f), Vector3f(1.0f, 1.0f, 1.0f)));
+        // Exit portal
+        staticColliders.push_back(makeBox(Vector3f(20.0f, 2.0f, 20.0f), Vector3f(2.0f, 3.0f, 2.0f)));
+        // Laser grid
+        staticColliders.push_back(makeBox(Vector3f(10.0f, 2.0f, 0.0f), Vector3f(1.0f, 2.0f, 4.0f)));
+        // Security camera base
+        staticColliders.push_back(makeBox(Vector3f(-15.0f, 5.0f, -15.0f), Vector3f(0.5f, 0.5f, 0.5f)));
+        // Motion detector
+        staticColliders.push_back(makeBox(Vector3f(5.0f, 1.0f, 5.0f), Vector3f(0.5f, 0.5f, 0.5f)));
+    } else if (gameState == STATE_TEMPLE) {
+        // Pyramids (corners)
+        staticColliders.push_back(makeBox(Vector3f(-20.0f, 3.0f, -20.0f), Vector3f(2.5f, 3.0f, 2.5f)));
+        staticColliders.push_back(makeBox(Vector3f(20.0f, 3.0f, -20.0f), Vector3f(2.5f, 3.0f, 2.5f)));
+        staticColliders.push_back(makeBox(Vector3f(-20.0f, 3.0f, 20.0f), Vector3f(2.5f, 3.0f, 2.5f)));
+        staticColliders.push_back(makeBox(Vector3f(20.0f, 3.0f, 20.0f), Vector3f(2.5f, 3.0f, 2.5f)));
+        // Guardian statue
+        staticColliders.push_back(makeBox(Vector3f(15.0f, 2.0f, 15.0f), Vector3f(1.0f, 2.0f, 1.0f)));
+        // Moving platform (dynamic)
+        float platformOffset = sin(gameTime * 2.0f) * 2.0f;
+        Vector3f platformCenter = Vector3f(0.0f, 3.0f + platformOffset, 0.0f);
+        staticColliders.push_back(makeBox(platformCenter, Vector3f(1.0f, 0.6f, 1.0f)));
+        // Exit portal (relocated to avoid pyramid overlap)
+        staticColliders.push_back(makeBox(Vector3f(-12.0f, 2.0f, -20.0f), Vector3f(2.0f, 3.0f, 2.0f)));
+    }
+
+    for (const auto& box : staticColliders) {
+        resolvePlayerAABBCollision(player, box);
+    }
 
     // Update camera
     camera.update(player);
