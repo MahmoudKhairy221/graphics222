@@ -727,56 +727,97 @@ struct SecurityRobot {
     Vector3f velocity;
     float yaw;              // Direction robot is facing
     float speed;            // Movement speed
+    float patrolSpeed;
+    float chaseSpeed;
+    float fovDegrees;
+    float detectDistance;
+    float patrolTimer;
     float damageTimer;      // Cooldown between damage hits
     bool active;            // Whether robot is currently chasing
+    bool chasing;
     
     SecurityRobot() {
         position = Vector3f(15.0f, GROUND_Y + 1.0f, 15.0f);  // Start position in Neo Tokyo
         velocity = Vector3f(0, 0, 0);
         yaw = 0.0f;
-        speed = 0.08f;      // Slightly slower than player
+        patrolSpeed = 0.3f;      // User choice
+        chaseSpeed = 0.8f;       // User choice
+        speed = patrolSpeed;
+        fovDegrees = 70.0f;
+        detectDistance = 18.0f;
+        patrolTimer = 0.0f;
         damageTimer = 0.0f;
         active = false;
+        chasing = false;
     }
     
-    void update(const Vector3f& playerPos, bool alarmOn, float deltaTime) {
-        if (alarmOn) {
+    void update(const Vector3f& playerPos, bool alarmOn, bool inNeoTokyo, float deltaTime) {
+        if (!inNeoTokyo) {
+            // Idle in other scenes
+            active = false;
+            chasing = false;
+            return;
+        }
+
+        // Determine if player is in FoV
+        Vector3f toPlayer = playerPos - position;
+        toPlayer.y = 0;
+        float dist = toPlayer.length();
+        bool inSight = false;
+        if (dist < detectDistance && dist > 0.001f) {
+            Vector3f dir = toPlayer * (1.0f / dist);
+            float yawRad = yaw * 3.14159f / 180.0f;
+            Vector3f forward = Vector3f(sin(yawRad), 0, cos(yawRad));
+            float dot = forward.dot(dir);
+            float cosHalfFov = cosf((fovDegrees * 0.5f) * 3.14159f / 180.0f);
+            inSight = dot > cosHalfFov;
+        }
+
+        if (alarmOn || inSight) {
             active = true;
-            // Calculate direction to player
-            Vector3f toPlayer = playerPos - position;
-            toPlayer.y = 0;  // Keep on ground plane
-            float dist = toPlayer.length();
-            
+            chasing = true;
+            speed = chaseSpeed;
+        } else {
+            // Patrol
+            chasing = false;
+            active = true;
+            speed = patrolSpeed;
+        }
+
+        if (chasing) {
             if (dist > 0.1f) {
-                // Normalize and move toward player
                 toPlayer = toPlayer * (1.0f / dist);
-                velocity.x = toPlayer.x * speed;
-                velocity.z = toPlayer.z * speed;
-                
-                // Update facing direction
+                velocity.x = toPlayer.x * speed * deltaTime * 60.0f;
+                velocity.z = toPlayer.z * speed * deltaTime * 60.0f;
                 yaw = atan2(toPlayer.x, toPlayer.z) * 180.0f / 3.14159f;
             }
-            
-            // Apply velocity
-            position = position + velocity;
-            
-            // Keep on ground
-            position.y = GROUND_Y + 1.0f;
-            
-            // Boundary collision
-            if (position.x < WORLD_MIN + 2) position.x = WORLD_MIN + 2;
-            if (position.x > WORLD_MAX - 2) position.x = WORLD_MAX - 2;
-            if (position.z < WORLD_MIN + 2) position.z = WORLD_MIN + 2;
-            if (position.z > WORLD_MAX - 2) position.z = WORLD_MAX - 2;
-            
-            // Update damage timer
-            if (damageTimer > 0) {
-                damageTimer -= deltaTime;
-            }
         } else {
-            // Stop when alarm is off
-            active = false;
-            velocity = Vector3f(0, 0, 0);
+            // Simple circular patrol around origin
+            patrolTimer += deltaTime * 0.5f;
+            float radius = 12.0f;
+            Vector3f target = Vector3f(cos(patrolTimer) * radius, position.y, sin(patrolTimer) * radius);
+            Vector3f toTarget = target - position;
+            toTarget.y = 0;
+            float tDist = toTarget.length();
+            if (tDist > 0.1f) {
+                toTarget = toTarget * (1.0f / tDist);
+                velocity.x = toTarget.x * speed * deltaTime * 60.0f;
+                velocity.z = toTarget.z * speed * deltaTime * 60.0f;
+                yaw = atan2(toTarget.x, toTarget.z) * 180.0f / 3.14159f;
+            } else {
+                velocity = Vector3f(0, 0, 0);
+            }
+        }
+
+        position = position + velocity;
+        position.y = GROUND_Y + 1.0f;
+        if (position.x < WORLD_MIN + 2) position.x = WORLD_MIN + 2;
+        if (position.x > WORLD_MAX - 2) position.x = WORLD_MAX - 2;
+        if (position.z < WORLD_MIN + 2) position.z = WORLD_MIN + 2;
+        if (position.z > WORLD_MAX - 2) position.z = WORLD_MAX - 2;
+
+        if (damageTimer > 0) {
+            damageTimer -= deltaTime;
         }
     }
     
@@ -2249,8 +2290,6 @@ void drawControlConsole(Vector3f pos, bool activated) {
 
 // Draw Security Robot - Futuristic robot guard for Neo Tokyo
 void drawSecurityRobot(const SecurityRobot& robot) {
-    if (!robot.active && !alarmActive) return;  // Don't draw if inactive
-    
     glPushMatrix();
     glTranslatef(robot.position.x, robot.position.y, robot.position.z);
     glRotatef(robot.yaw, 0, 1, 0);
@@ -2408,29 +2447,51 @@ void drawSecurityRobot(const SecurityRobot& robot) {
     
     glDisable(GL_TEXTURE_2D);
     
-    // Warning lights on shoulders (blinking when alarm active)
-    if (alarmActive) {
-        float blink = (sin(gameTime * 10.0f) > 0) ? 1.0f : 0.3f;
-        float warningEmissive[4] = {1.0f * blink, 0.3f * blink, 0.0f, 1.0f};
-        glMaterialfv(GL_FRONT, GL_EMISSION, warningEmissive);
-        glColor3f(1.0f * blink, 0.3f * blink, 0.0f);
-        
-        glPushMatrix();
-        glTranslatef(-0.6f, 0.55f, 0);
-        drawSphere(0.08f, 8, 8);
-        glPopMatrix();
-        glPushMatrix();
-        glTranslatef(0.6f, 0.55f, 0);
-        drawSphere(0.08f, 8, 8);
-        glPopMatrix();
-        
-        glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
-    }
+    // Warning lights on shoulders (always on; brighter when alarm/chasing)
+    float blink = (sin(gameTime * 10.0f) > 0) ? 1.0f : 0.5f;
+    if (!alarmActive && !robot.chasing) blink = 0.5f;
+    float warningEmissive[4] = {1.0f * blink, 0.3f * blink, 0.0f, 1.0f};
+    glMaterialfv(GL_FRONT, GL_EMISSION, warningEmissive);
+    glColor3f(1.0f * blink, 0.3f * blink, 0.0f);
+    
+    glPushMatrix();
+    glTranslatef(-0.6f, 0.55f, 0);
+    drawSphere(0.08f, 8, 8);
+    glPopMatrix();
+    glPushMatrix();
+    glTranslatef(0.6f, 0.55f, 0);
+    drawSphere(0.08f, 8, 8);
+    glPopMatrix();
+    
+    glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
     
     // Reset material
     float defaultSpec[4] = {0.5f, 0.5f, 0.5f, 1.0f};
     glMaterialfv(GL_FRONT, GL_SPECULAR, defaultSpec);
     glMaterialf(GL_FRONT, GL_SHININESS, 32.0f);
+    
+    // FoV cone on ground (red transparent)
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(1.0f, 0.0f, 0.0f, 0.25f);
+    glPushMatrix();
+    glTranslatef(robot.position.x, GROUND_Y + 0.05f, robot.position.z);
+    glRotatef(robot.yaw, 0, 1, 0);
+    float fov = robot.fovDegrees;
+    float range = robot.detectDistance;
+    float half = fov * 0.5f;
+    float a = half * 3.14159f / 180.0f;
+    float b = -half * 3.14159f / 180.0f;
+    glBegin(GL_TRIANGLES);
+    glNormal3f(0, 1, 0);
+    glVertex3f(0, 0, 0);
+    glVertex3f(sin(a) * range, 0, cos(a) * range);
+    glVertex3f(sin(b) * range, 0, cos(b) * range);
+    glEnd();
+    glPopMatrix();
+    glDisable(GL_BLEND);
+    glEnable(GL_LIGHTING);
     
     glPopMatrix();
 }
@@ -3030,6 +3091,14 @@ void drawWinScreen() {
         glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, scoreText[i]);
     }
     
+    // Restart prompt
+    glColor3f(0.8f, 0.8f, 0.8f);
+    char restartText[] = "Press R to Restart";
+    glRasterPos2f(WINDOW_WIDTH / 2 - 100, WINDOW_HEIGHT / 2 - 80);
+    for (int i = 0; restartText[i] != '\0'; i++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, restartText[i]);
+    }
+    
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_LIGHTING);
     
@@ -3059,6 +3128,14 @@ void drawLoseScreen() {
     glRasterPos2f(WINDOW_WIDTH / 2 - 80, WINDOW_HEIGHT / 2);
     for (int i = 0; loseText[i] != '\0'; i++) {
         glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, loseText[i]);
+    }
+    
+    // Restart prompt
+    glColor3f(0.8f, 0.8f, 0.8f);
+    char restartText[] = "Press R to Restart";
+    glRasterPos2f(WINDOW_WIDTH / 2 - 100, WINDOW_HEIGHT / 2 - 80);
+    for (int i = 0; restartText[i] != '\0'; i++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, restartText[i]);
     }
     
     glEnable(GL_DEPTH_TEST);
@@ -3183,7 +3260,7 @@ void checkCollectibles() {
     }
 }
 
-void checkObstacles() {
+void checkObstacles(float deltaTime) {
     if (gameState == STATE_NEO_TOKYO) {
         // Laser Grid collision
         Vector3f laserPos(10, 2, 0);
@@ -3234,8 +3311,8 @@ void checkObstacles() {
             alarmActive = false;
         }
 
-        // Security Robot update and collision
-        securityRobot.update(player.position, alarmActive, 0.016f);  // ~60fps deltaTime
+        // Security Robot update and collision (Neo-Tokyo only)
+        securityRobot.update(player.position, alarmActive, gameState == STATE_NEO_TOKYO, deltaTime);
         if (securityRobot.active && securityRobot.checkCollisionWithPlayer(player.position)) {
             if (securityRobot.damageTimer <= 0) {
                 player.health -= 3;  // Low damage
@@ -3422,7 +3499,7 @@ void updateGame(float deltaTime) {
 
     // Check collisions and interactions
     checkCollectibles();
-    checkObstacles();
+    checkObstacles(deltaTime);
 
     // Check win/lose conditions
     if (player.health <= 0) {
@@ -3497,6 +3574,16 @@ void reshape(int w, int h) {
 
 void keyboard(unsigned char key, int x, int y) {
     keys[key] = true;
+    
+    // Restart from win/lose screens
+    if ((gameState == STATE_WIN || gameState == STATE_LOSE) && (key == 'r' || key == 'R')) {
+        gameState = STATE_NEO_TOKYO;
+        player.health = MAX_HEALTH;
+        player.score = 0;
+        gameTime = 0.0f;
+        initializeNeoTokyo();
+        return;
+    }
     
     if (key == 'c' || key == 'C') {
         // Sync player/camera orientation when switching modes
