@@ -91,7 +91,7 @@ const float CEILING_Y = 20.0f;
 const float PLAYER_RADIUS = 0.5f;
 const float PLAYER_HEIGHT = 1.8f;
 const float PLAYER_SPEED = 0.4f;
-const float PLAYER_JUMP_FORCE = 0.5f;
+const float PLAYER_JUMP_FORCE = 0.3f;
 const float GRAVITY = -0.02f;
 
 // Game constants
@@ -255,6 +255,16 @@ const char* GUARD_TEXTURE_PATH = "robot_guard_texture/GuardReploid/GuardReploid.
 const char* ANUBIS_MODEL_PATH = "ancient_egypt_enemy_texture/FFXIII-LR_X360_MONSTER_Anubys/FFXIII-LR_X360_MONSTER_Anubys.obj";
 const char* ANUBIS_TEXTURE_PATH = "ancient_egypt_enemy_texture/FFXIII-LR_X360_MONSTER_Anubys/FFXIII-LR_X360_MONSTER_Anubys_Body_D.png";
 
+// New model paths for Neo-Tokyo neon sign and Egyptian tomb
+const char* NEON_SIGN_MODEL_PATH = "japanese-neon-street-sign/source/SIGN.obj";
+const char* NEON_SIGN_TEXTURE_PATH = "japanese-neon-street-sign/textures/sign_Albedo.tga.png";
+const char* NEON_SIGN_EMISSIVE_PATH = "japanese-neon-street-sign/textures/emiss.jpg";
+const char* TOMB_MODEL_PATH = "coffin-of-akhenaten-tomb-kv55/source/akhenatencoffin.obj";
+const char* TOMB_TEXTURE_PATH = "coffin-of-akhenaten-tomb-kv55/source/akhenatencoffin.1001.jpg";
+const char* HIEROGLYPHIC_TEXTURE_PATH = "egyptian-hieroglyphics-background-with-flat-design/388725-PCDZ9P-153.jpg";
+const char* COLUMN_MODEL_PATH = "column/Nothern Undead Asylum Pillar (Alternate)/o8601.obj";
+const char* COLUMN_TEXTURE_PATH = "column/Nothern Undead Asylum Pillar (Alternate)/m19_B_wall_07.png";
+
 // =============================================================================
 // Game State Enumeration
 // =============================================================================
@@ -315,8 +325,28 @@ public:
         // Update position
         position = position + velocity;
 
-        // Ground collision
-        if (position.y < GROUND_Y + PLAYER_HEIGHT / 2) {
+        // Ground collision - BUT allow falling into pits in Temple scene
+        // This basic check allows falling in pit areas; game logic handles the actual death
+        bool overPit = false;
+        
+        // Moving platform pit area (always present in Temple)
+        float mpHalfWidth = 3.5f;   // Slightly larger than actual pit
+        float mpHalfLength = 4.5f;
+        Vector3f mpBase(-10.0f, GROUND_Y, 10.0f);
+        if (position.x > mpBase.x - mpHalfWidth && position.x < mpBase.x + mpHalfWidth &&
+            position.z > mpBase.z - mpHalfLength && position.z < mpBase.z + mpHalfLength) {
+            overPit = true;
+        }
+        
+        // Pressure plate trap pit area (when door is open)
+        float ppHalfSize = 1.5f;  // Pressure plate size
+        Vector3f ppBase(5.0f, GROUND_Y, 0.0f);
+        if (position.x > ppBase.x - ppHalfSize && position.x < ppBase.x + ppHalfSize &&
+            position.z > ppBase.z - ppHalfSize && position.z < ppBase.z + ppHalfSize) {
+            overPit = true;  // Allow falling through pressure plate trap
+        }
+        
+        if (!overPit && position.y < GROUND_Y + PLAYER_HEIGHT / 2) {
             position.y = GROUND_Y + PLAYER_HEIGHT / 2;
             velocity.y = 0;
             onGround = true;
@@ -541,7 +571,62 @@ public:
             
             // Set camera eye position (with optional smoothing)
             Vector3f targetEye = player.position + cameraOffset;
-            eye = targetEye;  // Direct positioning (can add smoothing here if desired)
+            
+            // =========================================
+            // CAMERA BOUNDARY CONSTRAINT (Collision + Zoom)
+            // =========================================
+            // Check if camera would go outside world boundaries
+            // If so, smoothly zoom in to keep camera within bounds
+            const float BOUNDARY_MARGIN = 1.5f;  // Keep camera this far from walls
+            const float MIN_DISTANCE = 2.0f;     // Minimum camera distance from player
+            
+            float effectiveDistance = distance;
+            bool needsZoom = false;
+            
+            // Check each boundary and calculate required zoom
+            if (targetEye.x < WORLD_MIN + BOUNDARY_MARGIN) {
+                float overlapX = (WORLD_MIN + BOUNDARY_MARGIN) - targetEye.x;
+                float zoomFactorX = 1.0f - (overlapX / horizontalDist);
+                effectiveDistance = std::max(MIN_DISTANCE, effectiveDistance * zoomFactorX);
+                needsZoom = true;
+            }
+            if (targetEye.x > WORLD_MAX - BOUNDARY_MARGIN) {
+                float overlapX = targetEye.x - (WORLD_MAX - BOUNDARY_MARGIN);
+                float zoomFactorX = 1.0f - (overlapX / horizontalDist);
+                effectiveDistance = std::max(MIN_DISTANCE, effectiveDistance * zoomFactorX);
+                needsZoom = true;
+            }
+            if (targetEye.z < WORLD_MIN + BOUNDARY_MARGIN) {
+                float overlapZ = (WORLD_MIN + BOUNDARY_MARGIN) - targetEye.z;
+                float zoomFactorZ = 1.0f - (overlapZ / horizontalDist);
+                effectiveDistance = std::max(MIN_DISTANCE, effectiveDistance * zoomFactorZ);
+                needsZoom = true;
+            }
+            if (targetEye.z > WORLD_MAX - BOUNDARY_MARGIN) {
+                float overlapZ = targetEye.z - (WORLD_MAX - BOUNDARY_MARGIN);
+                float zoomFactorZ = 1.0f - (overlapZ / horizontalDist);
+                effectiveDistance = std::max(MIN_DISTANCE, effectiveDistance * zoomFactorZ);
+                needsZoom = true;
+            }
+            
+            // If zooming is needed, recalculate camera position with reduced distance
+            if (needsZoom) {
+                float newHorizontalDist = effectiveDistance * cos(radPitch);
+                float newVerticalOffset = height + effectiveDistance * sin(radPitch);
+                cameraOffset = Vector3f(
+                    sin(radYaw) * newHorizontalDist,
+                    newVerticalOffset,
+                    cos(radYaw) * newHorizontalDist
+                );
+                targetEye = player.position + cameraOffset;
+            }
+            
+            // Final hard clamp to ensure camera never goes outside bounds
+            targetEye.x = clampf(targetEye.x, WORLD_MIN + 0.5f, WORLD_MAX - 0.5f);
+            targetEye.z = clampf(targetEye.z, WORLD_MIN + 0.5f, WORLD_MAX - 0.5f);
+            targetEye.y = clampf(targetEye.y, GROUND_Y + 1.0f, CEILING_Y - 1.0f);
+            
+            eye = targetEye;
             
             // Camera looks at the player (slightly above ground for better framing)
             center = player.position + Vector3f(0, PLAYER_HEIGHT * 0.5f, 0);
@@ -683,12 +768,20 @@ TextureResource fallbackTexture;
 TextureResource neoTokyoSurface;
 TextureResource templeSurface;
 TextureResource guardTexture;  // Texture for security guard
+TextureResource neonSignTexture;     // Neo-Tokyo neon sign texture
+TextureResource neonSignEmissive;    // Neon sign emissive/glow texture
+TextureResource hieroglyphicTexture; // Egyptian hieroglyphic wall texture
+TextureResource tombTexture;         // Egyptian tomb/sarcophagus texture
+TextureResource columnTexture;       // Egyptian column texture
 CharacterMeshData mainCharacterMesh;
 OBJMesh scarabMesh;
 OBJMesh cameraMesh;
 OBJMesh consoleMesh;
 OBJMesh guardMesh;    // Robot guard model for Neo Tokyo
 OBJMesh anubisMesh;   // Anubis enemy model for Ancient Egypt
+OBJMesh neonSignMesh; // Japanese neon street sign model
+OBJMesh tombMesh;     // Egyptian coffin/sarcophagus model
+OBJMesh columnMesh;   // Egyptian pillar/column model
 bool textureSystemReady = false;
 bool guardTextureLoaded = false;
 
@@ -725,6 +818,14 @@ std::vector<PickupAnimation> pickupAnimations;
 float hitReactionTime = 0.0f;
 bool hitReactionActive = false;
 
+// Console activation animation state
+float consoleActivationTime = 0.0f;
+bool consoleActivationAnimActive = false;
+
+// Portal activation animation state
+float portalActivationTime = 0.0f;
+bool portalActivationAnimActive = false;
+
 // Security Robot struct
 struct SecurityRobot {
     Vector3f position;
@@ -745,7 +846,7 @@ struct SecurityRobot {
         velocity = Vector3f(0, 0, 0);
         yaw = 0.0f;
         patrolSpeed = 0.3f;      // User choice
-        chaseSpeed = 0.8f;       // User choice
+        chaseSpeed = 0.4f;       // User choice
         speed = patrolSpeed;
         fovDegrees = 70.0f;
         detectDistance = 18.0f;
@@ -836,6 +937,215 @@ struct SecurityRobot {
 SecurityRobot securityRobot;
 
 // =============================================================================
+// Pressure Plate Trap Structure (Egypt only)
+// =============================================================================
+struct PressurePlateTrap {
+    Vector3f position;       // Position of the plate
+    bool triggered;          // Has player stepped on it
+    float triggerTime;       // When was it triggered
+    float trapDoorOpen;      // 0.0 = closed, 1.0 = fully open
+    float spikeHeight;       // Current spike height (0 = retracted)
+    bool playerInTrap;       // Is player currently in the trap pit
+    float damageTimer;       // Cooldown for spike damage
+    
+    // Constants
+    static constexpr float PLATE_SIZE = 2.5f;        // Slightly larger plate for better visibility
+    static constexpr float PIT_DEPTH = 5.0f;         // Deep enough to be scary
+    static constexpr float DOOR_OPEN_TIME = 0.3f;    // Quick trap door opening
+    static constexpr float SPIKE_EXTEND_TIME = 0.5f; // Spike extension time
+    static constexpr float SPIKE_MAX_HEIGHT = 2.0f;  // Max spike height
+    static constexpr int SPIKE_DAMAGE = 5;           // Damage per spike hit
+    static constexpr float DAMAGE_COOLDOWN = 0.5f;   // Damage cooldown
+    
+    PressurePlateTrap(Vector3f pos) {
+        position = pos;
+        triggered = false;
+        triggerTime = 0.0f;
+        trapDoorOpen = 0.0f;
+        spikeHeight = 0.0f;
+        playerInTrap = false;
+        damageTimer = 0.0f;
+    }
+    
+    void update(float currentTime, float deltaTime) {
+        if (triggered) {
+            float elapsed = currentTime - triggerTime;
+            
+            // Open trap door (0.3 seconds)
+            if (elapsed < DOOR_OPEN_TIME) {
+                trapDoorOpen = elapsed / DOOR_OPEN_TIME;
+            } else {
+                trapDoorOpen = 1.0f;
+            }
+            
+            // Extend spikes after door opens (with visual telegraph delay)
+            if (elapsed > DOOR_OPEN_TIME + 0.2f) {
+                float spikeElapsed = elapsed - DOOR_OPEN_TIME - 0.2f;
+                spikeHeight = std::min(SPIKE_MAX_HEIGHT, (spikeElapsed / SPIKE_EXTEND_TIME) * SPIKE_MAX_HEIGHT);
+            }
+        }
+        
+        if (damageTimer > 0) {
+            damageTimer -= deltaTime;
+        }
+    }
+    
+    bool checkPlayerOnPlate(const Vector3f& playerPos) {
+        float halfSize = PLATE_SIZE * 0.5f;
+        return playerPos.x > position.x - halfSize && playerPos.x < position.x + halfSize &&
+               playerPos.z > position.z - halfSize && playerPos.z < position.z + halfSize &&
+               playerPos.y < position.y + 2.0f;  // Player must be at ground level
+    }
+    
+    bool checkPlayerInPit(const Vector3f& playerPos) {
+        if (!triggered || trapDoorOpen < 0.5f) return false;
+        float halfSize = PLATE_SIZE * 0.5f;
+        return playerPos.x > position.x - halfSize && playerPos.x < position.x + halfSize &&
+               playerPos.z > position.z - halfSize && playerPos.z < position.z + halfSize &&
+               playerPos.y < position.y;
+    }
+};
+
+// Single pressure plate trap instance for Egypt
+PressurePlateTrap templePressurePlate(Vector3f(5.0f, GROUND_Y, 0.0f));
+
+// =============================================================================
+// Moving Platform Structure (Egypt only - over fatal pit)
+// =============================================================================
+struct MovingPlatform {
+    Vector3f basePosition;    // Center of the platform path
+    float platformX;          // Current X position offset
+    float speed;              // Movement speed
+    float direction;          // 1.0 = moving right, -1.0 = moving left
+    float travelDistance;     // How far it travels from center
+    
+    // Pit properties
+    static constexpr float PIT_WIDTH = 6.0f;         // Narrow pit
+    static constexpr float PIT_LENGTH = 8.0f;        // Length of pit
+    static constexpr float PIT_DEPTH = 15.0f;        // Fatal depth
+    static constexpr float PLATFORM_SIZE = 2.5f;     // Platform size
+    
+    MovingPlatform() {
+        basePosition = Vector3f(-10.0f, GROUND_Y, 10.0f);  // Platform location
+        platformX = 0.0f;
+        speed = 3.0f;         // Units per second
+        direction = 1.0f;
+        travelDistance = 2.0f; // Travels 2 units left/right from center
+    }
+    
+    void update(float deltaTime) {
+        platformX += direction * speed * deltaTime;
+        
+        // Reverse direction at ends
+        if (platformX > travelDistance) {
+            platformX = travelDistance;
+            direction = -1.0f;
+        } else if (platformX < -travelDistance) {
+            platformX = -travelDistance;
+            direction = 1.0f;
+        }
+    }
+    
+    Vector3f getPlatformPosition() const {
+        return Vector3f(basePosition.x + platformX, basePosition.y + 0.5f, basePosition.z);
+    }
+    
+    bool checkPlayerOnPlatform(const Vector3f& playerPos) const {
+        Vector3f platPos = getPlatformPosition();
+        float halfSize = PLATFORM_SIZE * 0.5f;
+        float dy = playerPos.y - (platPos.y + 0.3f);  // Standing on top
+        return playerPos.x > platPos.x - halfSize && playerPos.x < platPos.x + halfSize &&
+               playerPos.z > platPos.z - halfSize && playerPos.z < platPos.z + halfSize &&
+               dy > -0.5f && dy < 1.5f;
+    }
+    
+    bool checkPlayerInPit(const Vector3f& playerPos) const {
+        float halfWidth = PIT_WIDTH * 0.5f;
+        float halfLength = PIT_LENGTH * 0.5f;
+        return playerPos.x > basePosition.x - halfWidth && playerPos.x < basePosition.x + halfWidth &&
+               playerPos.z > basePosition.z - halfLength && playerPos.z < basePosition.z + halfLength &&
+               playerPos.y < basePosition.y - 1.0f;
+    }
+};
+
+MovingPlatform templeMovingPlatform;
+
+// =============================================================================
+// Guardian Statue Patrol Structure (Egypt only)
+// =============================================================================
+struct GuardianPatrol {
+    Vector3f homePosition;    // Starting/center position
+    Vector3f position;        // Current position
+    float patrolOffset;       // Current offset along patrol path
+    float patrolDirection;    // 1.0 = forward, -1.0 = backward
+    float patrolDistance;     // How far to patrol (5 units)
+    float patrolSpeed;        // Same speed as current chase
+    float chaseSpeed;         // Chase speed when player near
+    float yaw;                // Current facing direction
+    float detectRadius;       // Radius to detect and chase player
+    bool chasing;             // Currently chasing player
+    float damageTimer;        // Damage cooldown
+    
+    GuardianPatrol() {
+        homePosition = Vector3f(15.0f, GROUND_Y + 1.0f, 15.0f);
+        position = homePosition;
+        patrolOffset = 0.0f;
+        patrolDirection = 1.0f;
+        patrolDistance = 5.0f;    // Patrol 5 units back and forth
+        patrolSpeed = 0.15f;      // Slow patrol
+        chaseSpeed = 0.3f;        // Same as current robot chase
+        yaw = 0.0f;
+        detectRadius = 6.0f;      // Small radius for chase trigger
+        chasing = false;
+        damageTimer = 0.0f;
+    }
+    
+    void update(const Vector3f& playerPos, float deltaTime) {
+        // Check if player is within chase radius
+        Vector3f toPlayer = playerPos - position;
+        toPlayer.y = 0;
+        float dist = toPlayer.length();
+        
+        if (dist < detectRadius && dist > 0.1f) {
+            // Chase player
+            chasing = true;
+            Vector3f dir = toPlayer * (1.0f / dist);
+            position.x += dir.x * chaseSpeed * deltaTime * 60.0f;
+            position.z += dir.z * chaseSpeed * deltaTime * 60.0f;
+            yaw = RAD2DEG(atan2(dir.x, dir.z));
+        } else {
+            // Patrol back and forth along Z axis
+            chasing = false;
+            patrolOffset += patrolDirection * patrolSpeed * deltaTime * 60.0f;
+            
+            if (patrolOffset > patrolDistance) {
+                patrolOffset = patrolDistance;
+                patrolDirection = -1.0f;
+            } else if (patrolOffset < -patrolDistance) {
+                patrolOffset = -patrolDistance;
+                patrolDirection = 1.0f;
+            }
+            
+            position = Vector3f(homePosition.x, homePosition.y, homePosition.z + patrolOffset);
+            yaw = patrolDirection > 0 ? 0.0f : 180.0f;  // Face patrol direction
+        }
+        
+        if (damageTimer > 0) {
+            damageTimer -= deltaTime;
+        }
+    }
+    
+    bool checkCollisionWithPlayer(const Vector3f& playerPos) {
+        float dx = position.x - playerPos.x;
+        float dz = position.z - playerPos.z;
+        float distSq = dx * dx + dz * dz;
+        return distSq < 4.0f;  // Collision radius of 2 units
+    }
+};
+
+GuardianPatrol templeGuardian;
+
+// =============================================================================
 // Texture & Model Loading Helpers
 // =============================================================================
 
@@ -922,6 +1232,19 @@ bool initializeTextureAssets() {
 
     if (!neoTokyoSurface.valid()) neoTokyoSurface = fallbackTexture;
     if (!templeSurface.valid()) templeSurface = fallbackTexture;
+
+    // Load new textures for Neo-Tokyo and Egypt enhancements
+    neonSignTexture = loadTextureFromFile(NEON_SIGN_TEXTURE_PATH);
+    neonSignEmissive = loadTextureFromFile(NEON_SIGN_EMISSIVE_PATH);
+    hieroglyphicTexture = loadTextureFromFile(HIEROGLYPHIC_TEXTURE_PATH);
+    tombTexture = loadTextureFromFile(TOMB_TEXTURE_PATH);
+    columnTexture = loadTextureFromFile(COLUMN_TEXTURE_PATH);
+    
+    if (!neonSignTexture.valid()) neonSignTexture = fallbackTexture;
+    if (!neonSignEmissive.valid()) neonSignEmissive = fallbackTexture;
+    if (!hieroglyphicTexture.valid()) hieroglyphicTexture = fallbackTexture;
+    if (!tombTexture.valid()) tombTexture = fallbackTexture;
+    if (!columnTexture.valid()) columnTexture = fallbackTexture;
 
     textureSystemReady = true;
     return true;
@@ -1736,6 +2059,27 @@ bool loadPropModels() {
         printf("Loaded Anubis model: %s\n", ANUBIS_MODEL_PATH);
     }
     
+    // Load Japanese neon street sign model for Neo-Tokyo
+    if (!loadOBJMesh(NEON_SIGN_MODEL_PATH, NEON_SIGN_TEXTURE_PATH, neonSignMesh)) {
+        printf("Warning: Failed to load neon sign model\n");
+    } else {
+        printf("Loaded neon sign model: %s\n", NEON_SIGN_MODEL_PATH);
+    }
+    
+    // Load Egyptian coffin/tomb model
+    if (!loadOBJMesh(TOMB_MODEL_PATH, TOMB_TEXTURE_PATH, tombMesh)) {
+        printf("Warning: Failed to load tomb/coffin model\n");
+    } else {
+        printf("Loaded tomb model: %s\n", TOMB_MODEL_PATH);
+    }
+    
+    // Load Egyptian column/pillar model
+    if (!loadOBJMesh(COLUMN_MODEL_PATH, COLUMN_TEXTURE_PATH, columnMesh)) {
+        printf("Warning: Failed to load column model\n");
+    } else {
+        printf("Loaded column model: %s\n", COLUMN_MODEL_PATH);
+    }
+    
     return success;
 }
 
@@ -2202,29 +2546,35 @@ void drawSecurityCamera(Vector3f pos, float rotation, float sweepAngle) {
         
         drawOBJMesh(cameraMesh, pos, rotation, cameraScale);
         
-        // Draw detection cone (points forward in direction camera faces)
+        // ALWAYS draw detection cone/laser (red when alarm, green when normal)
+        glPushMatrix();
+        glTranslatef(pos.x, pos.y, pos.z);
+        glRotatef(rotation, 0, 1, 0);
+        
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        
         if (alarmActive) {
-            glPushMatrix();
-            glTranslatef(pos.x, pos.y, pos.z);
-            glRotatef(rotation, 0, 1, 0);
-            glColor4f(1.0f, 0.0f, 0.0f, 0.2f);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            
-            // Detection cone pointing in +X direction (forward for this security camera model)
-            glBegin(GL_TRIANGLES);
-            glVertex3f(0, 0, 0);
-            float angle1 = -sweepAngle * 0.5f;
-            float angle2 = sweepAngle * 0.5f;
-            float dist = 8.0f;
-            // Cone points in +X direction (matches camera lens direction)
-            glVertex3f(cos(DEG2RAD(angle1)) * dist, -2.0f, sin(DEG2RAD(angle1)) * dist);
-            glVertex3f(cos(DEG2RAD(angle2)) * dist, -2.0f, sin(DEG2RAD(angle2)) * dist);
-            glEnd();
-            
-            glDisable(GL_BLEND);
-            glPopMatrix();
+            // Red cone when alarm is active (wider sweep)
+            glColor4f(1.0f, 0.0f, 0.0f, 0.3f);
+        } else {
+            // Green cone when normal (narrower sweep)
+            glColor4f(0.0f, 1.0f, 0.0f, 0.2f);
         }
+        
+        // Detection cone pointing in +X direction (forward for this security camera model)
+        glBegin(GL_TRIANGLES);
+        glVertex3f(0, 0, 0);
+        float angle1 = -sweepAngle * 0.5f;
+        float angle2 = sweepAngle * 0.5f;
+        float dist = 8.0f;
+        // Cone points in +X direction (matches camera lens direction)
+        glVertex3f(cos(DEG2RAD(angle1)) * dist, -2.0f, sin(DEG2RAD(angle1)) * dist);
+        glVertex3f(cos(DEG2RAD(angle2)) * dist, -2.0f, sin(DEG2RAD(angle2)) * dist);
+        glEnd();
+        
+        glDisable(GL_BLEND);
+        glPopMatrix();
     } else {
         // Fallback: Original placeholder
         glPushMatrix();
@@ -2244,17 +2594,26 @@ void drawSecurityCamera(Vector3f pos, float rotation, float sweepAngle) {
         drawSphere(0.15f, 12, 12);
         glPopMatrix();
 
+        // ALWAYS draw detection cone/laser (red when alarm, green when normal)
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        
         if (alarmActive) {
-            glColor4f(1.0f, 0.0f, 0.0f, 0.2f);
-            glBegin(GL_TRIANGLES);
-            glVertex3f(0, 0, 0);
-            float angle1 = -sweepAngle * 0.5f;
-            float angle2 = sweepAngle * 0.5f;
-            float dist = 8.0f;
-            glVertex3f(sin(DEG2RAD(angle1)) * dist, -2.0f, cos(DEG2RAD(angle1)) * dist);
-            glVertex3f(sin(DEG2RAD(angle2)) * dist, -2.0f, cos(DEG2RAD(angle2)) * dist);
-            glEnd();
+            glColor4f(1.0f, 0.0f, 0.0f, 0.3f);
+        } else {
+            glColor4f(0.0f, 1.0f, 0.0f, 0.2f);
         }
+        
+        glBegin(GL_TRIANGLES);
+        glVertex3f(0, 0, 0);
+        float angle1 = -sweepAngle * 0.5f;
+        float angle2 = sweepAngle * 0.5f;
+        float dist = 8.0f;
+        glVertex3f(sin(DEG2RAD(angle1)) * dist, -2.0f, cos(DEG2RAD(angle1)) * dist);
+        glVertex3f(sin(DEG2RAD(angle2)) * dist, -2.0f, cos(DEG2RAD(angle2)) * dist);
+        glEnd();
+        
+        glDisable(GL_BLEND);
 
         glPopMatrix();
     }
@@ -2268,9 +2627,15 @@ void drawControlConsole(Vector3f pos, bool activated) {
         float modelHeight = consoleMesh.boundsMax.y - consoleMesh.boundsMin.y;
         float consoleScale = targetSize / std::max(0.001f, modelHeight);
         
-        // Add glow if activated
+        // Add glow if activated with animation effect
         if (activated) {
-            float emissive[4] = {0.0f, 0.3f, 0.1f, 1.0f};
+            float emissiveIntensity = 0.3f;
+            // Enhanced glow during activation animation
+            if (consoleActivationAnimActive) {
+                float animTime = gameTime - consoleActivationTime;
+                emissiveIntensity = 0.3f + 0.5f * sin(animTime * 10.0f) * (1.0f - animTime / 1.5f);
+            }
+            float emissive[4] = {0.0f, emissiveIntensity, emissiveIntensity * 0.3f, 1.0f};
             glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
         }
         
@@ -2279,6 +2644,31 @@ void drawControlConsole(Vector3f pos, bool activated) {
         if (activated) {
             float noEmissive[4] = {0, 0, 0, 1.0f};
             glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
+        }
+        
+        // Draw activation particle effect
+        if (consoleActivationAnimActive) {
+            float animTime = gameTime - consoleActivationTime;
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_LIGHTING);
+            
+            // Rising particles
+            for (int i = 0; i < 8; i++) {
+                float angle = (i / 8.0f) * 2.0f * M_PI + animTime * 3.0f;
+                float radius = 1.0f + sin(animTime * 5.0f + i) * 0.3f;
+                float height = animTime * 4.0f + sin(i * 1.5f) * 0.5f;
+                float alpha = 1.0f - animTime / 1.5f;
+                
+                glPushMatrix();
+                glTranslatef(pos.x + cos(angle) * radius, pos.y + height, pos.z + sin(angle) * radius);
+                glColor4f(0.0f, 1.0f, 0.5f, alpha * 0.7f);
+                drawSphere(0.1f, 6, 6);
+                glPopMatrix();
+            }
+            
+            glEnable(GL_LIGHTING);
+            glDisable(GL_BLEND);
         }
     } else {
         // Fallback: Original placeholder
@@ -2292,7 +2682,14 @@ void drawControlConsole(Vector3f pos, bool activated) {
         glPushMatrix();
         glTranslatef(0, 0.8f, 0.76f);
         if (activated) {
-            glColor3f(0.0f, 1.0f, 0.0f);
+            // Flash green during activation
+            if (consoleActivationAnimActive) {
+                float animTime = gameTime - consoleActivationTime;
+                float flash = sin(animTime * 15.0f) * 0.5f + 0.5f;
+                glColor3f(flash * 0.5f, 1.0f, flash * 0.5f);
+            } else {
+                glColor3f(0.0f, 1.0f, 0.0f);
+            }
         } else {
             glColor3f(0.2f, 0.2f, 0.4f);
         }
@@ -2464,12 +2861,31 @@ void drawExitPortal(Vector3f pos, bool unlocked, float pulse) {
     glPushMatrix();
     glTranslatef(pos.x, pos.y, pos.z);
 
-    // Portal ring
+    // Portal ring - enhanced scale during activation animation
     float scale = 1.0f + pulse * 0.3f;
+    
+    // Portal activation animation effect
+    if (portalActivationAnimActive && unlocked) {
+        float animTime = gameTime - portalActivationTime;
+        // Rapid pulsing during activation
+        scale += sin(animTime * 15.0f) * 0.2f * (1.0f - animTime / 2.0f);
+    }
+    
     glScalef(scale, scale, scale);
 
-    // Emissive material
-    float emissive[4] = {0.2f + pulse * 0.3f, 0.4f + pulse * 0.4f, 0.8f + pulse * 0.2f, 1.0f};
+    // Emissive material - enhanced during activation
+    float emissiveBoost = 1.0f;
+    if (portalActivationAnimActive && unlocked) {
+        float animTime = gameTime - portalActivationTime;
+        emissiveBoost = 1.0f + sin(animTime * 10.0f) * 0.5f;
+    }
+    
+    float emissive[4] = {
+        (0.2f + pulse * 0.3f) * emissiveBoost, 
+        (0.4f + pulse * 0.4f) * emissiveBoost, 
+        (0.8f + pulse * 0.2f) * emissiveBoost, 
+        1.0f
+    };
     glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
     
     if (unlocked) {
@@ -2494,6 +2910,30 @@ void drawExitPortal(Vector3f pos, bool unlocked, float pulse) {
         glDisable(GL_BLEND);
     }
     glPopMatrix();
+    
+    // Draw activation particle burst effect
+    if (portalActivationAnimActive && unlocked) {
+        float animTime = gameTime - portalActivationTime;
+        glDisable(GL_LIGHTING);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        
+        // Expanding ring of particles
+        for (int i = 0; i < 16; i++) {
+            float angle = (i / 16.0f) * 2.0f * M_PI;
+            float expandRadius = 2.0f + animTime * 3.0f;
+            float alpha = 1.0f - animTime / 2.0f;
+            
+            glPushMatrix();
+            glTranslatef(cos(angle) * expandRadius, sin(animTime * 5.0f + i * 0.5f) * 0.5f, sin(angle) * expandRadius);
+            glColor4f(0.3f, 0.6f, 1.0f, alpha * 0.8f);
+            drawSphere(0.15f - animTime * 0.05f, 6, 6);
+            glPopMatrix();
+        }
+        
+        glEnable(GL_LIGHTING);
+        glDisable(GL_BLEND);
+    }
 
     float noEmissive[4] = {0, 0, 0, 1.0f};
     glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
@@ -2538,6 +2978,615 @@ void drawPressurePlate(Vector3f pos, bool triggered) {
     }
 
     drawCube(1.0f);
+    glPopMatrix();
+}
+
+// =============================================================================
+// Enhanced Pressure Plate Trap Drawing (Egypt) - With trap door and spikes
+// =============================================================================
+void drawPressurePlateTrap(const PressurePlateTrap& trap) {
+    float halfSize = PressurePlateTrap::PLATE_SIZE * 0.5f;
+    
+    glPushMatrix();
+    glTranslatef(trap.position.x, trap.position.y, trap.position.z);
+    
+    // Draw the pit hole (dark area beneath)
+    if (trap.trapDoorOpen > 0.01f) {
+        glColor3f(0.05f, 0.02f, 0.02f);  // Very dark pit
+        glBegin(GL_QUADS);
+        glNormal3f(0, 1, 0);
+        glVertex3f(-halfSize, -PressurePlateTrap::PIT_DEPTH, -halfSize);
+        glVertex3f(halfSize, -PressurePlateTrap::PIT_DEPTH, -halfSize);
+        glVertex3f(halfSize, -PressurePlateTrap::PIT_DEPTH, halfSize);
+        glVertex3f(-halfSize, -PressurePlateTrap::PIT_DEPTH, halfSize);
+        glEnd();
+        
+        // Pit walls
+        glColor3f(0.2f, 0.15f, 0.1f);
+        // Front wall
+        glBegin(GL_QUADS);
+        glNormal3f(0, 0, 1);
+        glVertex3f(-halfSize, -PressurePlateTrap::PIT_DEPTH, halfSize);
+        glVertex3f(halfSize, -PressurePlateTrap::PIT_DEPTH, halfSize);
+        glVertex3f(halfSize, 0, halfSize);
+        glVertex3f(-halfSize, 0, halfSize);
+        glEnd();
+        // Back wall
+        glBegin(GL_QUADS);
+        glNormal3f(0, 0, -1);
+        glVertex3f(-halfSize, 0, -halfSize);
+        glVertex3f(halfSize, 0, -halfSize);
+        glVertex3f(halfSize, -PressurePlateTrap::PIT_DEPTH, -halfSize);
+        glVertex3f(-halfSize, -PressurePlateTrap::PIT_DEPTH, -halfSize);
+        glEnd();
+        // Left wall
+        glBegin(GL_QUADS);
+        glNormal3f(-1, 0, 0);
+        glVertex3f(-halfSize, -PressurePlateTrap::PIT_DEPTH, -halfSize);
+        glVertex3f(-halfSize, -PressurePlateTrap::PIT_DEPTH, halfSize);
+        glVertex3f(-halfSize, 0, halfSize);
+        glVertex3f(-halfSize, 0, -halfSize);
+        glEnd();
+        // Right wall
+        glBegin(GL_QUADS);
+        glNormal3f(1, 0, 0);
+        glVertex3f(halfSize, 0, -halfSize);
+        glVertex3f(halfSize, 0, halfSize);
+        glVertex3f(halfSize, -PressurePlateTrap::PIT_DEPTH, halfSize);
+        glVertex3f(halfSize, -PressurePlateTrap::PIT_DEPTH, -halfSize);
+        glEnd();
+        
+        // Draw spikes at bottom of pit
+        if (trap.spikeHeight > 0.01f) {
+            glColor3f(0.5f, 0.5f, 0.5f);  // Metallic grey spikes
+            float spikeSpacing = 0.5f;
+            for (float sx = -halfSize + 0.3f; sx < halfSize; sx += spikeSpacing) {
+                for (float sz = -halfSize + 0.3f; sz < halfSize; sz += spikeSpacing) {
+                    glPushMatrix();
+                    glTranslatef(sx, -PressurePlateTrap::PIT_DEPTH, sz);
+                    glRotatef(-90, 1, 0, 0);
+                    glutSolidCone(0.1f, trap.spikeHeight, 8, 1);
+                    glPopMatrix();
+                }
+            }
+        }
+    }
+    
+    // Draw trap door panels (hinged on opposite sides)
+    if (trap.trapDoorOpen < 0.99f) {
+        float doorAngle = trap.trapDoorOpen * 90.0f;  // 0 to 90 degrees
+        
+        // Visual telegraph: plate glows red when about to trigger
+        if (!trap.triggered) {
+            // Normal plate color with warning pattern
+            glColor3f(0.5f, 0.35f, 0.2f);
+            
+            // Draw warning symbols on plate (hieroglyphic-style marks)
+            glPushMatrix();
+            glTranslatef(0, 0.01f, 0);
+            glColor3f(0.7f, 0.5f, 0.2f);  // Gold warning color
+            // Draw X pattern
+            glLineWidth(3.0f);
+            glBegin(GL_LINES);
+            glVertex3f(-halfSize * 0.7f, 0.02f, -halfSize * 0.7f);
+            glVertex3f(halfSize * 0.7f, 0.02f, halfSize * 0.7f);
+            glVertex3f(-halfSize * 0.7f, 0.02f, halfSize * 0.7f);
+            glVertex3f(halfSize * 0.7f, 0.02f, -halfSize * 0.7f);
+            glEnd();
+            glLineWidth(1.0f);
+            glPopMatrix();
+        } else {
+            glColor3f(0.8f, 0.2f, 0.1f);  // Red when triggered
+        }
+        
+        // Left door panel (hinges on left side)
+        glPushMatrix();
+        glTranslatef(-halfSize, 0, 0);
+        glRotatef(doorAngle, 0, 0, 1);
+        glTranslatef(halfSize * 0.5f, -0.1f, 0);
+        glScalef(halfSize, 0.2f, PressurePlateTrap::PLATE_SIZE);
+        drawCube(1.0f);
+        glPopMatrix();
+        
+        // Right door panel (hinges on right side)
+        glPushMatrix();
+        glTranslatef(halfSize, 0, 0);
+        glRotatef(-doorAngle, 0, 0, 1);
+        glTranslatef(-halfSize * 0.5f, -0.1f, 0);
+        glScalef(halfSize, 0.2f, PressurePlateTrap::PLATE_SIZE);
+        drawCube(1.0f);
+        glPopMatrix();
+    }
+    
+    // Draw decorative stone frame around pit
+    glColor3f(0.4f, 0.35f, 0.3f);
+    float frameWidth = 0.3f;
+    // Front frame
+    glPushMatrix();
+    glTranslatef(0, 0, halfSize + frameWidth * 0.5f);
+    glScalef(PressurePlateTrap::PLATE_SIZE + frameWidth * 2, 0.4f, frameWidth);
+    drawCube(1.0f);
+    glPopMatrix();
+    // Back frame
+    glPushMatrix();
+    glTranslatef(0, 0, -halfSize - frameWidth * 0.5f);
+    glScalef(PressurePlateTrap::PLATE_SIZE + frameWidth * 2, 0.4f, frameWidth);
+    drawCube(1.0f);
+    glPopMatrix();
+    // Left frame
+    glPushMatrix();
+    glTranslatef(-halfSize - frameWidth * 0.5f, 0, 0);
+    glScalef(frameWidth, 0.4f, PressurePlateTrap::PLATE_SIZE);
+    drawCube(1.0f);
+    glPopMatrix();
+    // Right frame
+    glPushMatrix();
+    glTranslatef(halfSize + frameWidth * 0.5f, 0, 0);
+    glScalef(frameWidth, 0.4f, PressurePlateTrap::PLATE_SIZE);
+    drawCube(1.0f);
+    glPopMatrix();
+    
+    glPopMatrix();
+}
+
+// =============================================================================
+// Moving Platform with Fatal Pit Drawing (Egypt)
+// =============================================================================
+void drawMovingPlatformWithPit(const MovingPlatform& platform) {
+    // Draw the pit (deadly hole in the ground)
+    float pitHalfWidth = MovingPlatform::PIT_WIDTH * 0.5f;
+    float pitHalfLength = MovingPlatform::PIT_LENGTH * 0.5f;
+    
+    glPushMatrix();
+    glTranslatef(platform.basePosition.x, platform.basePosition.y, platform.basePosition.z);
+    
+    // Pit floor (very dark)
+    glColor3f(0.02f, 0.01f, 0.01f);
+    glBegin(GL_QUADS);
+    glNormal3f(0, 1, 0);
+    glVertex3f(-pitHalfWidth, -MovingPlatform::PIT_DEPTH, -pitHalfLength);
+    glVertex3f(pitHalfWidth, -MovingPlatform::PIT_DEPTH, -pitHalfLength);
+    glVertex3f(pitHalfWidth, -MovingPlatform::PIT_DEPTH, pitHalfLength);
+    glVertex3f(-pitHalfWidth, -MovingPlatform::PIT_DEPTH, pitHalfLength);
+    glEnd();
+    
+    // Pit walls with temple texture
+    useTexture(templeSurface);
+    glColor3f(0.3f, 0.25f, 0.2f);
+    // Front wall
+    glBegin(GL_QUADS);
+    glNormal3f(0, 0, 1);
+    glTexCoord2f(0, 0); glVertex3f(-pitHalfWidth, -MovingPlatform::PIT_DEPTH, pitHalfLength);
+    glTexCoord2f(2, 0); glVertex3f(pitHalfWidth, -MovingPlatform::PIT_DEPTH, pitHalfLength);
+    glTexCoord2f(2, 3); glVertex3f(pitHalfWidth, 0, pitHalfLength);
+    glTexCoord2f(0, 3); glVertex3f(-pitHalfWidth, 0, pitHalfLength);
+    glEnd();
+    // Back wall
+    glBegin(GL_QUADS);
+    glNormal3f(0, 0, -1);
+    glTexCoord2f(0, 3); glVertex3f(-pitHalfWidth, 0, -pitHalfLength);
+    glTexCoord2f(2, 3); glVertex3f(pitHalfWidth, 0, -pitHalfLength);
+    glTexCoord2f(2, 0); glVertex3f(pitHalfWidth, -MovingPlatform::PIT_DEPTH, -pitHalfLength);
+    glTexCoord2f(0, 0); glVertex3f(-pitHalfWidth, -MovingPlatform::PIT_DEPTH, -pitHalfLength);
+    glEnd();
+    // Left wall
+    glBegin(GL_QUADS);
+    glNormal3f(-1, 0, 0);
+    glTexCoord2f(0, 0); glVertex3f(-pitHalfWidth, -MovingPlatform::PIT_DEPTH, -pitHalfLength);
+    glTexCoord2f(2, 0); glVertex3f(-pitHalfWidth, -MovingPlatform::PIT_DEPTH, pitHalfLength);
+    glTexCoord2f(2, 3); glVertex3f(-pitHalfWidth, 0, pitHalfLength);
+    glTexCoord2f(0, 3); glVertex3f(-pitHalfWidth, 0, -pitHalfLength);
+    glEnd();
+    // Right wall
+    glBegin(GL_QUADS);
+    glNormal3f(1, 0, 0);
+    glTexCoord2f(0, 3); glVertex3f(pitHalfWidth, 0, -pitHalfLength);
+    glTexCoord2f(2, 3); glVertex3f(pitHalfWidth, 0, pitHalfLength);
+    glTexCoord2f(2, 0); glVertex3f(pitHalfWidth, -MovingPlatform::PIT_DEPTH, pitHalfLength);
+    glTexCoord2f(0, 0); glVertex3f(pitHalfWidth, -MovingPlatform::PIT_DEPTH, -pitHalfLength);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+    
+    glPopMatrix();
+    
+    // Draw the moving platform
+    Vector3f platPos = platform.getPlatformPosition();
+    float platHalf = MovingPlatform::PLATFORM_SIZE * 0.5f;
+    
+    glPushMatrix();
+    glTranslatef(platPos.x, platPos.y, platPos.z);
+    
+    // Platform surface with sandstone texture
+    useTexture(templeSurface);
+    glColor3f(0.6f, 0.5f, 0.4f);
+    glBegin(GL_QUADS);
+    // Top
+    glNormal3f(0, 1, 0);
+    glTexCoord2f(0, 0); glVertex3f(-platHalf, 0.3f, -platHalf);
+    glTexCoord2f(1, 0); glVertex3f(platHalf, 0.3f, -platHalf);
+    glTexCoord2f(1, 1); glVertex3f(platHalf, 0.3f, platHalf);
+    glTexCoord2f(0, 1); glVertex3f(-platHalf, 0.3f, platHalf);
+    // Bottom
+    glNormal3f(0, -1, 0);
+    glVertex3f(-platHalf, -0.3f, -platHalf);
+    glVertex3f(-platHalf, -0.3f, platHalf);
+    glVertex3f(platHalf, -0.3f, platHalf);
+    glVertex3f(platHalf, -0.3f, -platHalf);
+    // Sides
+    glNormal3f(0, 0, 1);
+    glVertex3f(-platHalf, -0.3f, platHalf);
+    glVertex3f(-platHalf, 0.3f, platHalf);
+    glVertex3f(platHalf, 0.3f, platHalf);
+    glVertex3f(platHalf, -0.3f, platHalf);
+    glNormal3f(0, 0, -1);
+    glVertex3f(-platHalf, 0.3f, -platHalf);
+    glVertex3f(-platHalf, -0.3f, -platHalf);
+    glVertex3f(platHalf, -0.3f, -platHalf);
+    glVertex3f(platHalf, 0.3f, -platHalf);
+    glNormal3f(-1, 0, 0);
+    glVertex3f(-platHalf, -0.3f, -platHalf);
+    glVertex3f(-platHalf, 0.3f, -platHalf);
+    glVertex3f(-platHalf, 0.3f, platHalf);
+    glVertex3f(-platHalf, -0.3f, platHalf);
+    glNormal3f(1, 0, 0);
+    glVertex3f(platHalf, -0.3f, platHalf);
+    glVertex3f(platHalf, 0.3f, platHalf);
+    glVertex3f(platHalf, 0.3f, -platHalf);
+    glVertex3f(platHalf, -0.3f, -platHalf);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+    
+    // Decorative hieroglyphic pattern on top
+    glColor3f(0.4f, 0.35f, 0.25f);
+    glLineWidth(2.0f);
+    glBegin(GL_LINE_LOOP);
+    glVertex3f(-platHalf * 0.7f, 0.31f, -platHalf * 0.7f);
+    glVertex3f(platHalf * 0.7f, 0.31f, -platHalf * 0.7f);
+    glVertex3f(platHalf * 0.7f, 0.31f, platHalf * 0.7f);
+    glVertex3f(-platHalf * 0.7f, 0.31f, platHalf * 0.7f);
+    glEnd();
+    glLineWidth(1.0f);
+    
+    glPopMatrix();
+}
+
+// =============================================================================
+// Neon Sign Drawing (Neo-Tokyo)
+// =============================================================================
+void drawNeonSign(Vector3f pos, float rotY, float scale) {
+    glPushMatrix();
+    glTranslatef(pos.x, pos.y, pos.z);
+    glRotatef(rotY, 0, 1, 0);
+    
+    // Use the loaded neon sign OBJ model
+    if (neonSignMesh.loaded && !neonSignMesh.positions.empty()) {
+        // Calculate scale to fit desired size
+        float modelHeight = neonSignMesh.boundsMax.y - neonSignMesh.boundsMin.y;
+        float modelScale = scale / std::max(0.001f, modelHeight);
+        
+        glPushMatrix();
+        glScalef(modelScale, modelScale, modelScale);
+        glTranslatef(-neonSignMesh.boundsCenter.x, -neonSignMesh.boundsMin.y, -neonSignMesh.boundsCenter.z);
+        
+        // Make it glow with emissive material
+        float pulse = sin(gameTime * 3.0f) * 0.15f + 0.85f;
+        float emissive[4] = {0.9f * pulse, 0.3f * pulse, 0.7f * pulse, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
+        
+        bool hasUV = !neonSignMesh.texcoords.empty();
+        bool hasNormals = !neonSignMesh.normals.empty();
+        
+        if (neonSignMesh.albedo.valid()) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, neonSignMesh.albedo.id);
+            glColor3f(1.0f, 1.0f, 1.0f);
+        } else {
+            glDisable(GL_TEXTURE_2D);
+            glColor3f(1.0f, 0.3f, 0.8f);  // Pink neon fallback
+        }
+        
+        glBegin(GL_TRIANGLES);
+        for (size_t i = 0; i < neonSignMesh.indices.size(); i++) {
+            unsigned int idx = neonSignMesh.indices[i];
+            if (hasUV && idx * 2 + 1 < neonSignMesh.texcoords.size()) {
+                glTexCoord2f(neonSignMesh.texcoords[idx * 2], neonSignMesh.texcoords[idx * 2 + 1]);
+            }
+            if (hasNormals && idx * 3 + 2 < neonSignMesh.normals.size()) {
+                glNormal3f(neonSignMesh.normals[idx * 3], neonSignMesh.normals[idx * 3 + 1], neonSignMesh.normals[idx * 3 + 2]);
+            }
+            if (idx * 3 + 2 < neonSignMesh.positions.size()) {
+                glVertex3f(neonSignMesh.positions[idx * 3], neonSignMesh.positions[idx * 3 + 1], neonSignMesh.positions[idx * 3 + 2]);
+            }
+        }
+        glEnd();
+        
+        float noEmissive[4] = {0, 0, 0, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
+        glDisable(GL_TEXTURE_2D);
+        glPopMatrix();
+    } else {
+        // Fallback: Draw a simple glowing rectangle
+        float hw = scale * 0.5f;
+        float hh = scale * 0.3f;
+        
+        glColor3f(0.1f, 0.1f, 0.15f);
+        glBegin(GL_QUADS);
+        glNormal3f(0, 0, 1);
+        glVertex3f(-hw - 0.1f, -hh - 0.1f, -0.1f);
+        glVertex3f(hw + 0.1f, -hh - 0.1f, -0.1f);
+        glVertex3f(hw + 0.1f, hh + 0.1f, -0.1f);
+        glVertex3f(-hw - 0.1f, hh + 0.1f, -0.1f);
+        glEnd();
+        
+        float pulse = sin(gameTime * 3.0f) * 0.1f + 0.9f;
+        float emissive[4] = {0.8f * pulse, 0.2f * pulse, 0.6f * pulse, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
+        glColor3f(1.0f, 0.3f, 0.8f);
+        glBegin(GL_QUADS);
+        glNormal3f(0, 0, 1);
+        glVertex3f(-hw, -hh, 0);
+        glVertex3f(hw, -hh, 0);
+        glVertex3f(hw, hh, 0);
+        glVertex3f(-hw, hh, 0);
+        glEnd();
+        
+        float noEmissive[4] = {0, 0, 0, 1.0f};
+        glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
+    }
+    
+    glPopMatrix();
+}
+
+// =============================================================================
+// Hieroglyphic Wall Panel Drawing (Egypt)
+// =============================================================================
+void drawHieroglyphicWall(Vector3f pos, float rotY, float width, float height) {
+    glPushMatrix();
+    glTranslatef(pos.x, pos.y, pos.z);
+    glRotatef(rotY, 0, 1, 0);
+    
+    float hw = width * 0.5f;
+    float hh = height * 0.5f;
+    
+    // Stone wall base
+    useTexture(templeSurface);
+    glColor3f(0.6f, 0.55f, 0.5f);
+    glBegin(GL_QUADS);
+    glNormal3f(0, 0, 1);
+    glTexCoord2f(0, 0); glVertex3f(-hw - 0.1f, 0, -0.2f);
+    glTexCoord2f(width * 0.3f, 0); glVertex3f(hw + 0.1f, 0, -0.2f);
+    glTexCoord2f(width * 0.3f, height * 0.3f); glVertex3f(hw + 0.1f, height, -0.2f);
+    glTexCoord2f(0, height * 0.3f); glVertex3f(-hw - 0.1f, height, -0.2f);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    
+    // Hieroglyphic panel overlay
+    if (hieroglyphicTexture.valid()) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, hieroglyphicTexture.id);
+        glColor3f(0.9f, 0.85f, 0.7f);
+        
+        glBegin(GL_QUADS);
+        glNormal3f(0, 0, 1);
+        glTexCoord2f(0, 0); glVertex3f(-hw, 0.2f, 0);
+        glTexCoord2f(1, 0); glVertex3f(hw, 0.2f, 0);
+        glTexCoord2f(1, 1); glVertex3f(hw, height - 0.2f, 0);
+        glTexCoord2f(0, 1); glVertex3f(-hw, height - 0.2f, 0);
+        glEnd();
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+    }
+    
+    // Decorative frame
+    glColor3f(0.4f, 0.35f, 0.3f);
+    glLineWidth(3.0f);
+    glBegin(GL_LINE_LOOP);
+    glVertex3f(-hw, 0.1f, 0.01f);
+    glVertex3f(hw, 0.1f, 0.01f);
+    glVertex3f(hw, height - 0.1f, 0.01f);
+    glVertex3f(-hw, height - 0.1f, 0.01f);
+    glEnd();
+    glLineWidth(1.0f);
+    
+    glPopMatrix();
+}
+
+// =============================================================================
+// Tall Egyptian Column Drawing (at corners)
+// =============================================================================
+void drawTallColumn(Vector3f pos, float height) {
+    glPushMatrix();
+    glTranslatef(pos.x, pos.y, pos.z);
+    
+    // Use column OBJ model if loaded
+    if (columnMesh.loaded) {
+        // Calculate scale to match desired height
+        float modelHeight = columnMesh.boundsMax.y - columnMesh.boundsMin.y;
+        float columnScale = height / std::max(0.001f, modelHeight);
+        
+        glPushMatrix();
+        glScalef(columnScale, columnScale, columnScale);
+        glTranslatef(-columnMesh.boundsCenter.x, -columnMesh.boundsMin.y, -columnMesh.boundsCenter.z);
+        
+        // Bind column texture
+        if (columnTexture.valid()) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, columnTexture.id);
+            glColor3f(1.0f, 1.0f, 1.0f);
+        } else {
+            glColor3f(0.65f, 0.6f, 0.55f); // Stone color fallback
+        }
+        
+        // Render column mesh
+        glBegin(GL_TRIANGLES);
+        for (size_t i = 0; i < columnMesh.indices.size(); i++) {
+            unsigned int idx = columnMesh.indices[i];
+            if (idx * 3 + 2 < columnMesh.normals.size()) {
+                glNormal3f(columnMesh.normals[idx * 3], columnMesh.normals[idx * 3 + 1], columnMesh.normals[idx * 3 + 2]);
+            }
+            if (idx * 2 + 1 < columnMesh.texcoords.size()) {
+                glTexCoord2f(columnMesh.texcoords[idx * 2], columnMesh.texcoords[idx * 2 + 1]);
+            }
+            if (idx * 3 + 2 < columnMesh.positions.size()) {
+                glVertex3f(columnMesh.positions[idx * 3], columnMesh.positions[idx * 3 + 1], columnMesh.positions[idx * 3 + 2]);
+            }
+        }
+        glEnd();
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+        glPopMatrix();
+    } else {
+        // Fallback to procedural column
+        useTexture(templeSurface);
+        glColor3f(0.65f, 0.6f, 0.55f);
+        
+        // Column base (wider)
+        glPushMatrix();
+        glScalef(1.5f, 1.0f, 1.5f);
+        drawCylinder(1.0f, 1.0f, 1.0f, 16, 1);
+        glPopMatrix();
+        
+        // Main column shaft
+        glPushMatrix();
+        glTranslatef(0, 1.0f, 0);
+        glRotatef(-90, 1, 0, 0);
+        drawCylinder(0.8f, 0.7f, height - 2.0f, 16, 1);
+        glPopMatrix();
+        
+        // Column capital (top, wider)
+        glPushMatrix();
+        glTranslatef(0, height - 1.0f, 0);
+        glRotatef(-90, 1, 0, 0);
+        drawCylinder(0.7f, 1.2f, 1.0f, 16, 1);
+        glPopMatrix();
+        
+        // Lotus-style top decoration
+        glPushMatrix();
+        glTranslatef(0, height, 0);
+        glColor3f(0.5f, 0.45f, 0.4f);
+        glScalef(1.3f, 0.5f, 1.3f);
+        drawSphere(1.0f, 16, 8);
+        glPopMatrix();
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+    }
+    
+    glPopMatrix();
+}
+
+// =============================================================================
+// Sarcophagus/Tomb Drawing (Egypt)
+// =============================================================================
+void drawSarcophagus(Vector3f pos, float rotY) {
+    glPushMatrix();
+    glTranslatef(pos.x, pos.y, pos.z);
+    glRotatef(rotY, 0, 1, 0);
+    
+    // Use tomb OBJ model if loaded
+    if (tombMesh.loaded) {
+        // Calculate scale to make coffin about 2.5 units long
+        float targetSize = 2.5f;
+        float dimX = tombMesh.boundsMax.x - tombMesh.boundsMin.x;
+        float dimY = tombMesh.boundsMax.y - tombMesh.boundsMin.y;
+        float dimZ = tombMesh.boundsMax.z - tombMesh.boundsMin.z;
+        float modelLength = dimX;
+        if (dimY > modelLength) modelLength = dimY;
+        if (dimZ > modelLength) modelLength = dimZ;
+        float coffinScale = targetSize / std::max(0.001f, modelLength);
+        
+        glPushMatrix();
+        // Rotate to lay flat (coffin model is likely standing up)
+        glRotatef(-90.0f, 1, 0, 0);  // Rotate around X to lay it down
+        glScalef(coffinScale, coffinScale, coffinScale);
+        glTranslatef(-tombMesh.boundsCenter.x, -tombMesh.boundsCenter.y, -tombMesh.boundsMin.z);
+        
+        // Bind coffin texture
+        if (tombTexture.valid()) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, tombTexture.id);
+            glColor3f(1.0f, 1.0f, 1.0f);
+        } else {
+            glColor3f(0.8f, 0.7f, 0.5f); // Golden/sandy color fallback
+        }
+        
+        // Render coffin mesh
+        glBegin(GL_TRIANGLES);
+        for (size_t i = 0; i < tombMesh.indices.size(); i++) {
+            unsigned int idx = tombMesh.indices[i];
+            if (idx * 3 + 2 < tombMesh.normals.size()) {
+                glNormal3f(tombMesh.normals[idx * 3], tombMesh.normals[idx * 3 + 1], tombMesh.normals[idx * 3 + 2]);
+            }
+            if (idx * 2 + 1 < tombMesh.texcoords.size()) {
+                glTexCoord2f(tombMesh.texcoords[idx * 2], tombMesh.texcoords[idx * 2 + 1]);
+            }
+            if (idx * 3 + 2 < tombMesh.positions.size()) {
+                glVertex3f(tombMesh.positions[idx * 3], tombMesh.positions[idx * 3 + 1], tombMesh.positions[idx * 3 + 2]);
+            }
+        }
+        glEnd();
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+        glPopMatrix();
+    } else {
+        // Fallback to procedural sarcophagus
+        float length = 3.0f;
+        float width = 1.5f;
+        float height = 1.2f;
+        
+        if (tombTexture.valid()) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, tombTexture.id);
+            glColor3f(0.9f, 0.85f, 0.7f);
+        } else {
+            glColor3f(0.7f, 0.6f, 0.4f);
+        }
+        
+        float hl = length * 0.5f;
+        float hw = width * 0.5f;
+        
+        glBegin(GL_QUADS);
+        // Top
+        glNormal3f(0, 1, 0);
+        glTexCoord2f(0, 0); glVertex3f(-hl, height, -hw);
+        glTexCoord2f(1, 0); glVertex3f(hl, height, -hw);
+        glTexCoord2f(1, 1); glVertex3f(hl, height, hw);
+        glTexCoord2f(0, 1); glVertex3f(-hl, height, hw);
+        // Front
+        glNormal3f(0, 0, 1);
+        glTexCoord2f(0, 0); glVertex3f(-hl, 0, hw);
+        glTexCoord2f(1, 0); glVertex3f(hl, 0, hw);
+        glTexCoord2f(1, 0.5f); glVertex3f(hl, height, hw);
+        glTexCoord2f(0, 0.5f); glVertex3f(-hl, height, hw);
+        // Back
+        glNormal3f(0, 0, -1);
+        glTexCoord2f(0, 0.5f); glVertex3f(-hl, height, -hw);
+        glTexCoord2f(1, 0.5f); glVertex3f(hl, height, -hw);
+        glTexCoord2f(1, 0); glVertex3f(hl, 0, -hw);
+        glTexCoord2f(0, 0); glVertex3f(-hl, 0, -hw);
+        // Left
+        glNormal3f(-1, 0, 0);
+        glTexCoord2f(0, 0); glVertex3f(-hl, 0, -hw);
+        glTexCoord2f(0, 0.5f); glVertex3f(-hl, height, -hw);
+        glTexCoord2f(0.5f, 0.5f); glVertex3f(-hl, height, hw);
+        glTexCoord2f(0.5f, 0); glVertex3f(-hl, 0, hw);
+        // Right
+        glNormal3f(1, 0, 0);
+        glTexCoord2f(0.5f, 0); glVertex3f(hl, 0, hw);
+        glTexCoord2f(0.5f, 0.5f); glVertex3f(hl, height, hw);
+        glTexCoord2f(0, 0.5f); glVertex3f(hl, height, -hw);
+        glTexCoord2f(0, 0); glVertex3f(hl, 0, -hw);
+        glEnd();
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+    }
+    
     glPopMatrix();
 }
 
@@ -2740,6 +3789,40 @@ void drawNeoTokyoEnvironment() {
     glBindTexture(GL_TEXTURE_2D, 0);
     glDisable(GL_TEXTURE_2D);
 
+    // =============================================================================
+    // NEO-TOKYO NEON SIGNS (Japanese neon street signs on walls)
+    // =============================================================================
+    // Place neon signs at various locations on the walls
+    drawNeonSign(Vector3f(0.0f, 6.0f, WORLD_MIN + 0.2f), 0.0f, 1.5f);      // North wall center
+    drawNeonSign(Vector3f(-20.0f, 5.0f, WORLD_MIN + 0.2f), 0.0f, 1.2f);    // North wall left
+    drawNeonSign(Vector3f(WORLD_MAX - 0.2f, 7.0f, 0.0f), -90.0f, 1.3f);    // East wall center
+    drawNeonSign(Vector3f(WORLD_MIN + 0.2f, 6.0f, 5.0f), 90.0f, 1.2f);     // West wall
+    drawNeonSign(Vector3f(5.0f, 5.5f, WORLD_MAX - 0.2f), 180.0f, 1.4f);    // South wall
+
+    // =============================================================================
+    // NEO-TOKYO STATIC MESH DECORATIONS
+    // =============================================================================
+    // Futuristic server racks / data terminals along walls
+    glColor3f(0.15f, 0.2f, 0.25f);
+    for (int i = 0; i < 4; i++) {
+        float x = -20.0f + i * 12.0f;
+        glPushMatrix();
+        glTranslatef(x, 0, WORLD_MIN + 2.0f);
+        glScalef(1.5f, 4.0f, 1.0f);
+        drawCube(1.0f);
+        glPopMatrix();
+        // LED indicator lights
+        glDisable(GL_LIGHTING);
+        float blink = (sin(gameTime * 5.0f + i) > 0) ? 1.0f : 0.3f;
+        glColor3f(0.0f, blink, 0.0f);
+        glPushMatrix();
+        glTranslatef(x, 3.0f, WORLD_MIN + 1.6f);
+        drawSphere(0.1f, 8, 8);
+        glPopMatrix();
+        glEnable(GL_LIGHTING);
+        glColor3f(0.15f, 0.2f, 0.25f);
+    }
+
         // Draw collectibles
         for (size_t i = 0; i < crystals.size(); i++) {
             if (!crystals[i].collected) {
@@ -2858,16 +3941,18 @@ void drawTempleEnvironment() {
     glBindTexture(GL_TEXTURE_2D, 0);
     glDisable(GL_TEXTURE_2D);
 
-    // Ancient columns
-    for (int i = 0; i < 6; i++) {
-        float angle = (i / 6.0f) * 2.0f * M_PI;
-        float radius = 12.0f;
-        glPushMatrix();
-        glTranslatef(cos(angle) * radius, 0, sin(angle) * radius);
-        glColor3f(0.6f, 0.55f, 0.5f);
-        drawCylinder(0.8f, 0.8f, 8.0f, 16, 1);
-        glPopMatrix();
-    }
+    // =============================================================================
+    // TALL EGYPTIAN COLUMNS AT ALL 4 CORNERS
+    // =============================================================================
+    float columnHeight = 12.0f;  // Relatively tall columns
+    float cornerOffset = 5.0f;   // Distance from corner
+    drawTallColumn(Vector3f(WORLD_MIN + cornerOffset, GROUND_Y, WORLD_MIN + cornerOffset), columnHeight);
+    drawTallColumn(Vector3f(WORLD_MAX - cornerOffset, GROUND_Y, WORLD_MIN + cornerOffset), columnHeight);
+    drawTallColumn(Vector3f(WORLD_MIN + cornerOffset, GROUND_Y, WORLD_MAX - cornerOffset), columnHeight);
+    drawTallColumn(Vector3f(WORLD_MAX - cornerOffset, GROUND_Y, WORLD_MAX - cornerOffset), columnHeight);
+
+    // Original ancient columns (ring in center) - REMOVED per user request
+    // Keeping only the 4 corner columns
 
     // Pyramids (decorative) - using temple texture, larger size, darker color
     useTexture(templeSurface);
@@ -2882,6 +3967,39 @@ void drawTempleEnvironment() {
     }
     glBindTexture(GL_TEXTURE_2D, 0);
     glDisable(GL_TEXTURE_2D);
+
+    // =============================================================================
+    // HIEROGLYPHIC WALL PANELS - Cover all walls completely
+    // =============================================================================
+    // North wall (Z = WORLD_MIN) - Multiple panels to cover entire wall
+    drawHieroglyphicWall(Vector3f(-25.0f, GROUND_Y, WORLD_MIN + 0.3f), 0.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(-10.0f, GROUND_Y, WORLD_MIN + 0.3f), 0.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(5.0f, GROUND_Y, WORLD_MIN + 0.3f), 0.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(20.0f, GROUND_Y, WORLD_MIN + 0.3f), 0.0f, 12.0f, 15.0f);
+    
+    // South wall (Z = WORLD_MAX) - Multiple panels
+    drawHieroglyphicWall(Vector3f(-25.0f, GROUND_Y, WORLD_MAX - 0.3f), 180.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(-10.0f, GROUND_Y, WORLD_MAX - 0.3f), 180.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(5.0f, GROUND_Y, WORLD_MAX - 0.3f), 180.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(20.0f, GROUND_Y, WORLD_MAX - 0.3f), 180.0f, 12.0f, 15.0f);
+    
+    // East wall (X = WORLD_MAX) - Multiple panels
+    drawHieroglyphicWall(Vector3f(WORLD_MAX - 0.3f, GROUND_Y, -25.0f), -90.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(WORLD_MAX - 0.3f, GROUND_Y, -10.0f), -90.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(WORLD_MAX - 0.3f, GROUND_Y, 5.0f), -90.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(WORLD_MAX - 0.3f, GROUND_Y, 20.0f), -90.0f, 12.0f, 15.0f);
+    
+    // West wall (X = WORLD_MIN) - Multiple panels
+    drawHieroglyphicWall(Vector3f(WORLD_MIN + 0.3f, GROUND_Y, -25.0f), 90.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(WORLD_MIN + 0.3f, GROUND_Y, -10.0f), 90.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(WORLD_MIN + 0.3f, GROUND_Y, 5.0f), 90.0f, 12.0f, 15.0f);
+    drawHieroglyphicWall(Vector3f(WORLD_MIN + 0.3f, GROUND_Y, 20.0f), 90.0f, 12.0f, 15.0f);
+
+    // =============================================================================
+    // SARCOPHAGI (2 tomb coffins)
+    // =============================================================================
+    drawSarcophagus(Vector3f(-8.0f, GROUND_Y, 15.0f), 45.0f);   // First sarcophagus
+    drawSarcophagus(Vector3f(12.0f, GROUND_Y, -8.0f), -30.0f);  // Second sarcophagus
 
     // Draw collectibles
     for (size_t i = 0; i < scarabs.size(); i++) {
@@ -2913,19 +4031,20 @@ void drawTempleEnvironment() {
         }
     }
 
-    // Draw obstacles
-    // Pressure Plates
-    static bool plateTriggered[3] = {false, false, false};
-    for (int i = 0; i < 3; i++) {
-        float x = -10.0f + i * 10.0f;
-        drawPressurePlate(Vector3f(x, 0.5f, -10), plateTriggered[i]);
-    }
+    // =============================================================================
+    // PRESSURE PLATE TRAP WITH TRAP DOOR AND SPIKES
+    // =============================================================================
+    drawPressurePlateTrap(templePressurePlate);
 
-    // Moving Platform removed from center
+    // =============================================================================
+    // MOVING PLATFORM OVER FATAL PIT
+    // =============================================================================
+    drawMovingPlatformWithPit(templeMovingPlatform);
 
-    // Guardian Statue
-    float guardRotation = fmod(gameTime * 20.0f, 360.0f);
-    drawGuardianStatue(Vector3f(15, 1, 15), guardRotation);
+    // =============================================================================
+    // GUARDIAN STATUE WITH PATROL (uses templeGuardian)
+    // =============================================================================
+    drawGuardianStatue(templeGuardian.position, templeGuardian.yaw);
 
     // Exit Portal (moved inward to avoid corner pyramid)
     bool portalReady = player.scarabsCollected >= SCARABS_REQUIRED;
@@ -3189,6 +4308,8 @@ void initializeNeoTokyo() {
     portalUnlocked = false;
     alarmActive = false;
     hitReactionActive = false;
+    consoleActivationAnimActive = false;
+    portalActivationAnimActive = false;
     lighting.currentScene = 0;
     
     // Reset security robot
@@ -3225,7 +4346,18 @@ void initializeTemple() {
     
     // Reset game state
     hitReactionActive = false;
+    consoleActivationAnimActive = false;
+    portalActivationAnimActive = false;
     lighting.currentScene = 1;
+    
+    // Reset pressure plate trap
+    templePressurePlate = PressurePlateTrap(Vector3f(5.0f, GROUND_Y, 0.0f));
+    
+    // Reset moving platform
+    templeMovingPlatform = MovingPlatform();
+    
+    // Reset guardian patrol
+    templeGuardian = GuardianPatrol();
     
     // Reset camera (keep current mode, reset angles)
     camera.cameraYaw = 0.0f;
@@ -3345,6 +4477,12 @@ void checkObstacles(float deltaTime) {
                 if (!consoleActivated) {
                     consoleActivated = true;
                     portalUnlocked = true;
+                    // Trigger console activation animation
+                    consoleActivationAnimActive = true;
+                    consoleActivationTime = gameTime;
+                    // Trigger portal unlock animation
+                    portalActivationAnimActive = true;
+                    portalActivationTime = gameTime;
                     playSFX("console_activate");
                 }
             }
@@ -3359,39 +4497,90 @@ void checkObstacles(float deltaTime) {
             playSFX("portal_enter");
         }
     } else if (gameState == STATE_TEMPLE) {
-        // Pressure Plate traps
-        for (int i = 0; i < 3; i++) {
-            float x = -10.0f + i * 10.0f;
-            Vector3f platePos(x, 0.5f, -10);
-            if ((player.position - platePos).lengthSquared() < 2.0f) {
-                player.health -= 2;
+        // =============================================================================
+        // PRESSURE PLATE TRAP (Single trap with trap door and spikes)
+        // =============================================================================
+        templePressurePlate.update(gameTime, deltaTime);
+        
+        // Check if player steps on the plate
+        if (!templePressurePlate.triggered && templePressurePlate.checkPlayerOnPlate(player.position)) {
+            templePressurePlate.triggered = true;
+            templePressurePlate.triggerTime = gameTime;
+            playSFX("trap_trigger");
+        }
+        
+        // Check if player is in the pit with spikes
+        if (templePressurePlate.checkPlayerInPit(player.position)) {
+            templePressurePlate.playerInTrap = true;
+            
+            // Fall damage when landing at the bottom of the pit
+            float pitBottom = GROUND_Y - PressurePlateTrap::PIT_DEPTH + 1.0f;
+            if (player.position.y <= pitBottom + PLAYER_HEIGHT * 0.5f) {
+                // Land at pit bottom
+                player.position.y = pitBottom + PLAYER_HEIGHT * 0.5f;
+                
+                // Apply fall damage if falling fast
+                if (player.velocity.y < -0.3f) {
+                    int fallDamage = (int)(fabsf(player.velocity.y) * 30.0f);
+                    player.health -= fallDamage;
+                    hitReactionActive = true;
+                    hitReactionTime = gameTime;
+                    playSFX("fall_impact");
+                }
+                player.velocity.y = 0;
+                player.onGround = true;
+            }
+            
+            // Spike damage (player must jump out!)
+            if (templePressurePlate.spikeHeight > 0.5f && templePressurePlate.damageTimer <= 0) {
+                player.health -= PressurePlateTrap::SPIKE_DAMAGE;
                 hitReactionActive = true;
                 hitReactionTime = gameTime;
-                playSFX("trap_trigger");
+                templePressurePlate.damageTimer = PressurePlateTrap::DAMAGE_COOLDOWN;
+                playSFX("spike_hit");
             }
+        } else {
+            templePressurePlate.playerInTrap = false;
         }
 
-        // Moving Platform collision
-        Vector3f platformPos(0, 3, 0);
-        float platformOffset = sin(gameTime * 2.0f) * 2.0f;
-        Vector3f platformWorldPos = platformPos + Vector3f(0, platformOffset, 0);
-        if ((player.position - platformWorldPos).lengthSquared() < 4.0f && 
-            player.position.y < platformWorldPos.y + 1.5f &&
-            player.position.y > platformWorldPos.y - 1.5f) {
-            player.position.y = platformWorldPos.y + 1.5f;
+        // =============================================================================
+        // MOVING PLATFORM OVER FATAL PIT
+        // =============================================================================
+        templeMovingPlatform.update(deltaTime);
+        
+        // Check if player is on the platform
+        if (templeMovingPlatform.checkPlayerOnPlatform(player.position)) {
+            // Move player with the platform
+            Vector3f platPos = templeMovingPlatform.getPlatformPosition();
+            player.position.x += templeMovingPlatform.direction * templeMovingPlatform.speed * deltaTime;
+            player.position.y = platPos.y + 0.8f;
             player.onGround = true;
             player.velocity.y = 0;
         }
+        
+        // Check if player fell into the fatal pit
+        if (templeMovingPlatform.checkPlayerInPit(player.position)) {
+            // Fatal fall - instant death
+            player.health = 0;
+            playSFX("fall_death");
+        }
 
-        // Guardian Statue collision
-        Vector3f guardPos(15, 1, 15);
-        if ((player.position - guardPos).lengthSquared() < 4.0f) {
-            player.health -= 3;
-            Vector3f knockback = (player.position - guardPos).unit() * 2.0f;
-            player.velocity = player.velocity + knockback;
-            hitReactionActive = true;
-            hitReactionTime = gameTime;
-            playSFX("guardian_hit");
+        // =============================================================================
+        // GUARDIAN STATUE PATROL (Back and forth with chase when near)
+        // =============================================================================
+        templeGuardian.update(player.position, deltaTime);
+        
+        // Guardian collision damage
+        if (templeGuardian.checkCollisionWithPlayer(player.position)) {
+            if (templeGuardian.damageTimer <= 0) {
+                player.health -= 5;
+                Vector3f knockback = (player.position - templeGuardian.position).unit() * 2.0f;
+                player.velocity = player.velocity + knockback;
+                hitReactionActive = true;
+                hitReactionTime = gameTime;
+                templeGuardian.damageTimer = 1.0f;  // 1 second cooldown
+                playSFX("guardian_hit");
+            }
         }
 
         // Exit Portal (relocated to avoid pyramid overlap)
@@ -3415,6 +4604,16 @@ void updateGame(float deltaTime) {
     // Update hit reaction
     if (hitReactionActive && (gameTime - hitReactionTime) > 0.3f) {
         hitReactionActive = false;
+    }
+
+    // Update console activation animation (lasts 1.5 seconds)
+    if (consoleActivationAnimActive && (gameTime - consoleActivationTime) > 1.5f) {
+        consoleActivationAnimActive = false;
+    }
+
+    // Update portal activation animation (lasts 2.0 seconds)
+    if (portalActivationAnimActive && (gameTime - portalActivationTime) > 2.0f) {
+        portalActivationAnimActive = false;
     }
 
     // Clean up finished pickup animations
@@ -3499,8 +4698,21 @@ void updateGame(float deltaTime) {
         staticColliders.push_back(makeBox(Vector3f(20.0f, 3.0f, -20.0f), Vector3f(2.5f, 3.0f, 2.5f)));
         staticColliders.push_back(makeBox(Vector3f(-20.0f, 3.0f, 20.0f), Vector3f(2.5f, 3.0f, 2.5f)));
         staticColliders.push_back(makeBox(Vector3f(20.0f, 3.0f, 20.0f), Vector3f(2.5f, 3.0f, 2.5f)));
-        // Guardian statue
-        staticColliders.push_back(makeBox(Vector3f(15.0f, 2.0f, 15.0f), Vector3f(1.0f, 2.0f, 1.0f)));
+        
+        // Tall columns at corners
+        float columnOffset = 5.0f;
+        staticColliders.push_back(makeBox(Vector3f(WORLD_MIN + columnOffset, 6.0f, WORLD_MIN + columnOffset), Vector3f(1.0f, 6.0f, 1.0f)));
+        staticColliders.push_back(makeBox(Vector3f(WORLD_MAX - columnOffset, 6.0f, WORLD_MIN + columnOffset), Vector3f(1.0f, 6.0f, 1.0f)));
+        staticColliders.push_back(makeBox(Vector3f(WORLD_MIN + columnOffset, 6.0f, WORLD_MAX - columnOffset), Vector3f(1.0f, 6.0f, 1.0f)));
+        staticColliders.push_back(makeBox(Vector3f(WORLD_MAX - columnOffset, 6.0f, WORLD_MAX - columnOffset), Vector3f(1.0f, 6.0f, 1.0f)));
+        
+        // Sarcophagi (2 tombs)
+        staticColliders.push_back(makeBox(Vector3f(-8.0f, 0.6f, 15.0f), Vector3f(1.8f, 0.8f, 1.0f)));
+        staticColliders.push_back(makeBox(Vector3f(12.0f, 0.6f, -8.0f), Vector3f(1.8f, 0.8f, 1.0f)));
+        
+        // Guardian statue (now uses templeGuardian position - dynamic)
+        staticColliders.push_back(makeBox(templeGuardian.position, Vector3f(1.0f, 2.0f, 1.0f)));
+        
         // Exit portal (relocated to avoid pyramid overlap)
         staticColliders.push_back(makeBox(Vector3f(-12.0f, 2.0f, -20.0f), Vector3f(2.0f, 3.0f, 2.0f)));
     }
@@ -3522,8 +4734,8 @@ void updateGame(float deltaTime) {
         playSFX("game_over");
     }
 
-    // Check fatal pit (Temple)
-    if (gameState == STATE_TEMPLE && player.position.y < -5.0f) {
+    // Check fatal pit (Temple) - only moving platform pit is fatal, not pressure plate trap
+    if (gameState == STATE_TEMPLE && player.position.y < -10.0f) {
         gameState = STATE_LOSE;
         playSFX("game_over");
     }
