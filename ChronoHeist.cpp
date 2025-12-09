@@ -250,8 +250,10 @@ const char* CAMERA_MODEL_PATH = "Security Camera/security_camera.obj";
 const char* CAMERA_TEXTURE_PATH = "";  // No texture for now
 const char* CONSOLE_MODEL_PATH = "sci-fi-console/source/OBJECT 9/OBJECT 9.obj";
 const char* CONSOLE_TEXTURE_PATH = "sci-fi-console/source/OBJECT 9/Texture 1.jpg";
-const char* GUARD_MODEL_PATH = "guard/FF07scoc_00.dae";  // DAE format - using texture only for now
-const char* GUARD_TEXTURE_PATH = "guard/FF07scoc_00.png";
+const char* GUARD_MODEL_PATH = "robot_guard_texture/GuardReploid/GuardReploid.obj";
+const char* GUARD_TEXTURE_PATH = "robot_guard_texture/GuardReploid/GuardReploid.png";
+const char* ANUBIS_MODEL_PATH = "ancient_egypt_enemy_texture/FFXIII-LR_X360_MONSTER_Anubys/FFXIII-LR_X360_MONSTER_Anubys.obj";
+const char* ANUBIS_TEXTURE_PATH = "ancient_egypt_enemy_texture/FFXIII-LR_X360_MONSTER_Anubys/FFXIII-LR_X360_MONSTER_Anubys_Body_D.png";
 
 // =============================================================================
 // Game State Enumeration
@@ -685,6 +687,8 @@ CharacterMeshData mainCharacterMesh;
 OBJMesh scarabMesh;
 OBJMesh cameraMesh;
 OBJMesh consoleMesh;
+OBJMesh guardMesh;    // Robot guard model for Neo Tokyo
+OBJMesh anubisMesh;   // Anubis enemy model for Ancient Egypt
 bool textureSystemReady = false;
 bool guardTextureLoaded = false;
 
@@ -1712,13 +1716,24 @@ bool loadPropModels() {
         success = false;
     }
     
-    // Load guard texture (model is DAE format, so we just load the texture)
-    guardTexture = loadTextureFromFile(GUARD_TEXTURE_PATH);
-    if (guardTexture.valid()) {
-        guardTextureLoaded = true;
-        printf("Loaded guard texture: %s\n", GUARD_TEXTURE_PATH);
+    // Load robot guard OBJ model for Neo Tokyo
+    if (!loadOBJMesh(GUARD_MODEL_PATH, GUARD_TEXTURE_PATH, guardMesh)) {
+        printf("Warning: Failed to load guard model\n");
+        // Fallback: load just the texture for placeholder geometry
+        guardTexture = loadTextureFromFile(GUARD_TEXTURE_PATH);
+        if (guardTexture.valid()) {
+            guardTextureLoaded = true;
+        }
     } else {
-        printf("Warning: Failed to load guard texture\n");
+        guardTextureLoaded = true;
+        printf("Loaded guard model: %s\n", GUARD_MODEL_PATH);
+    }
+    
+    // Load Anubis enemy OBJ model for Ancient Egypt
+    if (!loadOBJMesh(ANUBIS_MODEL_PATH, ANUBIS_TEXTURE_PATH, anubisMesh)) {
+        printf("Warning: Failed to load Anubis enemy model\n");
+    } else {
+        printf("Loaded Anubis model: %s\n", ANUBIS_MODEL_PATH);
     }
     
     return success;
@@ -2294,160 +2309,107 @@ void drawSecurityRobot(const SecurityRobot& robot) {
     glTranslatef(robot.position.x, robot.position.y, robot.position.z);
     glRotatef(robot.yaw, 0, 1, 0);
     
-    // Use guard texture if loaded
-    bool useTexture = guardTextureLoaded && guardTexture.valid();
-    if (useTexture) {
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, guardTexture.id);
-        glColor3f(1.0f, 1.0f, 1.0f);
-    }
-    
-    // Robot body - metallic/armored appearance
-    float specular[4] = {0.8f, 0.8f, 0.9f, 1.0f};
-    glMaterialfv(GL_FRONT, GL_SPECULAR, specular);
-    glMaterialf(GL_FRONT, GL_SHININESS, 80.0f);
-    
-    // Helper lambda for textured cube
-    auto drawTexturedCube = [&](float size) {
-        float hs = size * 0.5f;
-        glBegin(GL_QUADS);
-        // Front
-        glNormal3f(0, 0, 1);
-        glTexCoord2f(0.0f, 0.0f); glVertex3f(-hs, -hs, hs);
-        glTexCoord2f(0.3f, 0.0f); glVertex3f(hs, -hs, hs);
-        glTexCoord2f(0.3f, 0.5f); glVertex3f(hs, hs, hs);
-        glTexCoord2f(0.0f, 0.5f); glVertex3f(-hs, hs, hs);
-        // Back
-        glNormal3f(0, 0, -1);
-        glTexCoord2f(0.3f, 0.0f); glVertex3f(-hs, -hs, -hs);
-        glTexCoord2f(0.3f, 0.5f); glVertex3f(-hs, hs, -hs);
-        glTexCoord2f(0.6f, 0.5f); glVertex3f(hs, hs, -hs);
-        glTexCoord2f(0.6f, 0.0f); glVertex3f(hs, -hs, -hs);
-        // Top
-        glNormal3f(0, 1, 0);
-        glTexCoord2f(0.0f, 0.5f); glVertex3f(-hs, hs, -hs);
-        glTexCoord2f(0.0f, 1.0f); glVertex3f(-hs, hs, hs);
-        glTexCoord2f(0.3f, 1.0f); glVertex3f(hs, hs, hs);
-        glTexCoord2f(0.3f, 0.5f); glVertex3f(hs, hs, -hs);
-        // Bottom
-        glNormal3f(0, -1, 0);
-        glTexCoord2f(0.3f, 0.5f); glVertex3f(-hs, -hs, -hs);
-        glTexCoord2f(0.6f, 0.5f); glVertex3f(hs, -hs, -hs);
-        glTexCoord2f(0.6f, 1.0f); glVertex3f(hs, -hs, hs);
-        glTexCoord2f(0.3f, 1.0f); glVertex3f(-hs, -hs, hs);
-        // Right
-        glNormal3f(1, 0, 0);
-        glTexCoord2f(0.6f, 0.0f); glVertex3f(hs, -hs, -hs);
-        glTexCoord2f(0.6f, 0.5f); glVertex3f(hs, hs, -hs);
-        glTexCoord2f(1.0f, 0.5f); glVertex3f(hs, hs, hs);
-        glTexCoord2f(1.0f, 0.0f); glVertex3f(hs, -hs, hs);
-        // Left
-        glNormal3f(-1, 0, 0);
-        glTexCoord2f(0.0f, 0.0f); glVertex3f(-hs, -hs, -hs);
-        glTexCoord2f(0.3f, 0.0f); glVertex3f(-hs, -hs, hs);
-        glTexCoord2f(0.3f, 0.5f); glVertex3f(-hs, hs, hs);
-        glTexCoord2f(0.0f, 0.5f); glVertex3f(-hs, hs, -hs);
+    // Use guard OBJ model if loaded
+    if (guardMesh.loaded) {
+        // Calculate scale to make guard about 2.0 units tall
+        float targetSize = 2.0f;
+        float modelHeight = guardMesh.boundsMax.y - guardMesh.boundsMin.y;
+        float guardScale = targetSize / std::max(0.001f, modelHeight);
+        
+        // Center and draw the model
+        glPushMatrix();
+        glScalef(guardScale, guardScale, guardScale);
+        glTranslatef(-guardMesh.boundsCenter.x, -guardMesh.boundsMin.y, -guardMesh.boundsCenter.z);
+        
+        bool hasUV = !guardMesh.texcoords.empty();
+        bool hasNormals = !guardMesh.normals.empty();
+        
+        if (guardMesh.albedo.valid()) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, guardMesh.albedo.id);
+            glColor3f(1.0f, 1.0f, 1.0f);
+        } else {
+            glDisable(GL_TEXTURE_2D);
+            glColor3f(0.3f, 0.3f, 0.35f);
+        }
+        
+        glBegin(GL_TRIANGLES);
+        for (size_t i = 0; i < guardMesh.indices.size(); i++) {
+            unsigned int idx = guardMesh.indices[i];
+            if (hasUV && idx * 2 + 1 < guardMesh.texcoords.size()) {
+                glTexCoord2f(guardMesh.texcoords[idx * 2], guardMesh.texcoords[idx * 2 + 1]);
+            }
+            if (hasNormals && idx * 3 + 2 < guardMesh.normals.size()) {
+                glNormal3f(guardMesh.normals[idx * 3], guardMesh.normals[idx * 3 + 1], guardMesh.normals[idx * 3 + 2]);
+            }
+            if (idx * 3 + 2 < guardMesh.positions.size()) {
+                glVertex3f(guardMesh.positions[idx * 3], guardMesh.positions[idx * 3 + 1], guardMesh.positions[idx * 3 + 2]);
+            }
+        }
         glEnd();
-    };
-    
-    if (!useTexture) {
-        glColor3f(0.25f, 0.25f, 0.3f);
-    }
-    
-    // Main body (torso)
-    glPushMatrix();
-    glScalef(0.8f, 1.2f, 0.5f);
-    drawTexturedCube(1.0f);
-    glPopMatrix();
-    
-    // Head
-    glPushMatrix();
-    glTranslatef(0, 0.9f, 0);
-    if (!useTexture) glColor3f(0.3f, 0.3f, 0.35f);
-    drawSphere(0.35f, 16, 16);
-    
-    // Visor (eye strip) - glowing red when active
-    glDisable(GL_TEXTURE_2D);
-    glPushMatrix();
-    glTranslatef(0, 0.05f, 0.25f);
-    if (alarmActive) {
-        float emissive[4] = {1.0f, 0.0f, 0.0f, 1.0f};
-        glMaterialfv(GL_FRONT, GL_EMISSION, emissive);
-        glColor3f(1.0f, 0.0f, 0.0f);
+        
+        glDisable(GL_TEXTURE_2D);
+        glPopMatrix();
     } else {
-        glColor3f(0.2f, 0.2f, 0.3f);
+        // Fallback: Use placeholder geometry with texture
+        bool useTexture = guardTextureLoaded && guardTexture.valid();
+        if (useTexture) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, guardTexture.id);
+            glColor3f(1.0f, 1.0f, 1.0f);
+        }
+        
+        // Robot body - metallic/armored appearance
+        float specular[4] = {0.8f, 0.8f, 0.9f, 1.0f};
+        glMaterialfv(GL_FRONT, GL_SPECULAR, specular);
+        glMaterialf(GL_FRONT, GL_SHININESS, 80.0f);
+        
+        if (!useTexture) glColor3f(0.25f, 0.25f, 0.3f);
+        
+        // Main body (torso)
+        glPushMatrix();
+        glScalef(0.8f, 1.2f, 0.5f);
+        drawCube(1.0f);
+        glPopMatrix();
+        
+        // Head
+        glPushMatrix();
+        glTranslatef(0, 0.9f, 0);
+        if (!useTexture) glColor3f(0.3f, 0.3f, 0.35f);
+        drawSphere(0.35f, 16, 16);
+        glPopMatrix();
+        
+        // Arms
+        if (!useTexture) glColor3f(0.22f, 0.22f, 0.27f);
+        glPushMatrix();
+        glTranslatef(-0.7f, 0.0f, 0);
+        glScalef(0.15f, 0.6f, 0.15f);
+        drawCube(1.0f);
+        glPopMatrix();
+        glPushMatrix();
+        glTranslatef(0.7f, 0.0f, 0);
+        glScalef(0.15f, 0.6f, 0.15f);
+        drawCube(1.0f);
+        glPopMatrix();
+        
+        // Legs
+        if (!useTexture) glColor3f(0.2f, 0.2f, 0.25f);
+        glPushMatrix();
+        glTranslatef(-0.25f, -0.9f, 0);
+        glScalef(0.2f, 0.6f, 0.2f);
+        drawCube(1.0f);
+        glPopMatrix();
+        glPushMatrix();
+        glTranslatef(0.25f, -0.9f, 0);
+        glScalef(0.2f, 0.6f, 0.2f);
+        drawCube(1.0f);
+        glPopMatrix();
+        
+        glDisable(GL_TEXTURE_2D);
     }
-    glScalef(0.5f, 0.15f, 0.1f);
-    drawCube(1.0f);
-    float noEmissive[4] = {0, 0, 0, 1.0f};
-    glMaterialfv(GL_FRONT, GL_EMISSION, noEmissive);
-    glPopMatrix();
-    glPopMatrix();
-    
-    // Re-enable texture for body parts
-    if (useTexture) {
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, guardTexture.id);
-        glColor3f(1.0f, 1.0f, 1.0f);
-    }
-    
-    // Shoulders
-    if (!useTexture) glColor3f(0.2f, 0.2f, 0.25f);
-    glPushMatrix();
-    glTranslatef(-0.6f, 0.4f, 0);
-    drawSphere(0.2f, 12, 12);
-    glPopMatrix();
-    glPushMatrix();
-    glTranslatef(0.6f, 0.4f, 0);
-    drawSphere(0.2f, 12, 12);
-    glPopMatrix();
-    
-    // Arms
-    if (!useTexture) glColor3f(0.22f, 0.22f, 0.27f);
-    // Left arm
-    glPushMatrix();
-    glTranslatef(-0.7f, 0.0f, 0);
-    glScalef(0.15f, 0.6f, 0.15f);
-    drawTexturedCube(1.0f);
-    glPopMatrix();
-    // Right arm
-    glPushMatrix();
-    glTranslatef(0.7f, 0.0f, 0);
-    glScalef(0.15f, 0.6f, 0.15f);
-    drawTexturedCube(1.0f);
-    glPopMatrix();
-    
-    // Legs
-    if (!useTexture) glColor3f(0.2f, 0.2f, 0.25f);
-    // Left leg
-    glPushMatrix();
-    glTranslatef(-0.25f, -0.9f, 0);
-    glScalef(0.2f, 0.6f, 0.2f);
-    drawTexturedCube(1.0f);
-    glPopMatrix();
-    // Right leg
-    glPushMatrix();
-    glTranslatef(0.25f, -0.9f, 0);
-    glScalef(0.2f, 0.6f, 0.2f);
-    drawTexturedCube(1.0f);
-    glPopMatrix();
-    
-    // Feet
-    if (!useTexture) glColor3f(0.15f, 0.15f, 0.2f);
-    glPushMatrix();
-    glTranslatef(-0.25f, -1.3f, 0.1f);
-    glScalef(0.25f, 0.1f, 0.35f);
-    drawTexturedCube(1.0f);
-    glPopMatrix();
-    glPushMatrix();
-    glTranslatef(0.25f, -1.3f, 0.1f);
-    glScalef(0.25f, 0.1f, 0.35f);
-    drawTexturedCube(1.0f);
-    glPopMatrix();
-    
-    glDisable(GL_TEXTURE_2D);
     
     // Warning lights on shoulders (always on; brighter when alarm/chasing)
+    float noEmissive[4] = {0, 0, 0, 1.0f};
     float blink = (sin(gameTime * 10.0f) > 0) ? 1.0f : 0.5f;
     if (!alarmActive && !robot.chasing) blink = 0.5f;
     float warningEmissive[4] = {1.0f * blink, 0.3f * blink, 0.0f, 1.0f};
@@ -2469,6 +2431,8 @@ void drawSecurityRobot(const SecurityRobot& robot) {
     float defaultSpec[4] = {0.5f, 0.5f, 0.5f, 1.0f};
     glMaterialfv(GL_FRONT, GL_SPECULAR, defaultSpec);
     glMaterialf(GL_FRONT, GL_SHININESS, 32.0f);
+    
+    glPopMatrix();
     
     // FoV cone on ground (red transparent)
     glDisable(GL_LIGHTING);
@@ -2591,29 +2555,80 @@ void drawGuardianStatue(Vector3f pos, float rotation) {
     glTranslatef(pos.x, pos.y, pos.z);
     glRotatef(rotation, 0, 1, 0);
 
-    glColor3f(0.6f, 0.5f, 0.4f);
-    
-    // Body
-    glPushMatrix();
-    glTranslatef(0, 1.5f, 0);
-    drawCube(1.0f);
-    glPopMatrix();
+    // Use Anubis OBJ model if loaded
+    if (anubisMesh.loaded) {
+        // Calculate scale to make Anubis about 3.0 units tall (statue size)
+        float targetSize = 3.0f;
+        float modelHeight = anubisMesh.boundsMax.y - anubisMesh.boundsMin.y;
+        float anubisScale = targetSize / std::max(0.001f, modelHeight);
+        
+        glPushMatrix();
+        glScalef(anubisScale, anubisScale, anubisScale);
+        glTranslatef(-anubisMesh.boundsCenter.x, -anubisMesh.boundsMin.y, -anubisMesh.boundsCenter.z);
+        
+        bool hasUV = !anubisMesh.texcoords.empty();
+        bool hasNormals = !anubisMesh.normals.empty();
+        
+        if (anubisMesh.albedo.valid()) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, anubisMesh.albedo.id);
+            glColor3f(1.0f, 1.0f, 1.0f);
+        } else {
+            glDisable(GL_TEXTURE_2D);
+            glColor3f(0.6f, 0.5f, 0.3f);  // Sandy gold color
+        }
+        
+        glBegin(GL_TRIANGLES);
+        for (size_t i = 0; i < anubisMesh.indices.size(); i++) {
+            unsigned int idx = anubisMesh.indices[i];
+            if (hasUV && idx * 2 + 1 < anubisMesh.texcoords.size()) {
+                glTexCoord2f(anubisMesh.texcoords[idx * 2], anubisMesh.texcoords[idx * 2 + 1]);
+            }
+            if (hasNormals && idx * 3 + 2 < anubisMesh.normals.size()) {
+                glNormal3f(anubisMesh.normals[idx * 3], anubisMesh.normals[idx * 3 + 1], anubisMesh.normals[idx * 3 + 2]);
+            }
+            if (idx * 3 + 2 < anubisMesh.positions.size()) {
+                glVertex3f(anubisMesh.positions[idx * 3], anubisMesh.positions[idx * 3 + 1], anubisMesh.positions[idx * 3 + 2]);
+            }
+        }
+        glEnd();
+        
+        glDisable(GL_TEXTURE_2D);
+        glPopMatrix();
+    } else {
+        // Fallback: Draw placeholder jackal-headed statue
+        glColor3f(0.6f, 0.5f, 0.4f);
+        
+        // Body
+        glPushMatrix();
+        glTranslatef(0, 1.5f, 0);
+        drawCube(1.0f);
+        glPopMatrix();
 
-    // Head
-    glPushMatrix();
-    glTranslatef(0, 2.5f, 0);
-    drawSphere(0.4f, 16, 16);
-    glPopMatrix();
+        // Head (jackal-like)
+        glPushMatrix();
+        glTranslatef(0, 2.5f, 0);
+        glColor3f(0.4f, 0.35f, 0.25f);
+        drawSphere(0.4f, 16, 16);
+        // Snout
+        glPushMatrix();
+        glTranslatef(0, -0.1f, 0.4f);
+        glScalef(0.3f, 0.2f, 0.5f);
+        drawCube(1.0f);
+        glPopMatrix();
+        glPopMatrix();
 
-    // Arms
-    glPushMatrix();
-    glTranslatef(-0.7f, 1.5f, 0);
-    drawCylinder(0.15f, 0.15f, 1.0f, 12, 1);
-    glPopMatrix();
-    glPushMatrix();
-    glTranslatef(0.7f, 1.5f, 0);
-    drawCylinder(0.15f, 0.15f, 1.0f, 12, 1);
-    glPopMatrix();
+        // Arms
+        glColor3f(0.6f, 0.5f, 0.4f);
+        glPushMatrix();
+        glTranslatef(-0.7f, 1.5f, 0);
+        drawCylinder(0.15f, 0.15f, 1.0f, 12, 1);
+        glPopMatrix();
+        glPushMatrix();
+        glTranslatef(0.7f, 1.5f, 0);
+        drawCylinder(0.15f, 0.15f, 1.0f, 12, 1);
+        glPopMatrix();
+    }
 
     glPopMatrix();
 }
